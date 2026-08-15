@@ -26,6 +26,9 @@
 //!   `fc_`, `fco_`, `ctc_`, `ctco_`, `ws_`). History produced by another
 //!   provider (e.g. DeepSeek via the aggregate) uses raw UUID ids, which relays
 //!   reject; they are normalized to the expected prefix here.
+//! - Codex multi-agent `agent_message` items. Third-party Responses relays may
+//!   silently discard this private item type, so it is converted to a standard
+//!   user `message` while preserving its text content.
 //! - The OpenAI-private `internal_chat_message_metadata_passthrough` field.
 //!
 //! This module is gated to non-official providers so real OpenAI passthrough
@@ -89,11 +92,32 @@ pub(crate) fn sanitize_relay_responses_request(body: &mut Value, profile: RelayP
         let Some(obj) = item.as_object_mut() else {
             continue;
         };
-        let item_type = obj
+        let mut item_type = obj
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        if item_type == "agent_message" {
+            // `agent_message` is an OpenAI-private multi-agent history item.
+            // Relays such as Console Go accept the request but silently omit
+            // this item from the model context, so the worker never sees its
+            // NEW_TASK payload. A normal user message preserves the plaintext
+            // task while keeping official OpenAI passthrough untouched.
+            obj.insert("type".to_string(), Value::String("message".to_string()));
+            obj.insert("role".to_string(), Value::String("user".to_string()));
+            obj.remove("author");
+            obj.remove("recipient");
+            if let Some(id) = obj
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+            {
+                let id = id.strip_prefix("amsg_").unwrap_or(&id);
+                obj.insert("id".to_string(), Value::String(format!("msg_{id}")));
+            }
+            item_type = "message".to_string();
+            changed = true;
+        }
         changed |= obj
             .remove("internal_chat_message_metadata_passthrough")
             .is_some();
@@ -376,6 +400,61 @@ mod tests {
 
         let changed_again = sanitize_relay_responses_request(&mut body, RelayProfile::ConsoleGo);
         assert!(!changed_again, "sanitizer must be idempotent");
+    }
+
+    #[test]
+    fn converts_agent_messages_to_plain_user_messages() {
+        let mut body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "msg_existing",
+                    "role": "developer",
+                    "content": [{ "type": "input_text", "text": "worker instructions" }]
+                },
+                {
+                    "type": "agent_message",
+                    "id": "amsg_dispatch",
+                    "author": "/root",
+                    "recipient": "/root/worker",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "Message Type: NEW_TASK\nPayload:\ndispatch-ok"
+                    }],
+                    "internal_chat_message_metadata_passthrough": { "turn_id": "turn_1" }
+                }
+            ]
+        });
+
+        assert!(sanitize_relay_responses_request(
+            &mut body,
+            RelayProfile::ConsoleGo
+        ));
+
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(
+            input[0]["role"], "developer",
+            "ordinary messages stay unchanged"
+        );
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[1]["id"], "msg_dispatch");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            "Message Type: NEW_TASK\nPayload:\ndispatch-ok"
+        );
+        assert!(input[1].get("author").is_none());
+        assert!(input[1].get("recipient").is_none());
+        assert!(input[1]
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
+
+        assert!(
+            !sanitize_relay_responses_request(&mut body, RelayProfile::ConsoleGo),
+            "conversion must be idempotent"
+        );
     }
 
     #[test]

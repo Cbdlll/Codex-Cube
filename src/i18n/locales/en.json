@@ -2266,7 +2266,7 @@
     "previewHide": "Hide preview",
     "formDescriptionHint": "Written into the Workflow Skill's Registered subagents section and used by Codex to decide when to delegate. Describe specialty, boundaries, and when to use.",
     "formModelBaseUrlHint": "API endpoint",
-    "installedStatus": "Installed — the Workflow Skill is installed into Codex skills and AGENTS.md is not modified. Invoke it explicitly with @cube-dispatch in any Codex conversation.",
+    "installedStatus": "Installed — the Workflow Skill is installed into Codex skills. Invoke it explicitly with @Cube Dispatch in any Codex conversation.",
     "currentWorkerSummary": "Current worker",
     "subagentDeleteFailedDetail": "Failed to delete subagent: {{detail}}",
     "subagentDeleteBlockedByWorkflow": "This subagent is selected in the Workflow Skill. Deselect it before deleting.",

@@ -689,28 +689,26 @@ function App() {
                 {t("common.settings")}
               </span>
             </button>
-            {isCurrentAppTakeoverActive && (
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsDefaultTab("usage");
-                  setCurrentView("settings");
-                }}
-                aria-label={t("usage.title", { defaultValue: "Usage" })}
-                title={t("usage.title", { defaultValue: "Usage" })}
-                className={cn(
-                  "topbar-nav-item",
-                  currentView === "settings" &&
-                    settingsDefaultTab === "usage" &&
-                    "topbar-nav-item-active",
-                )}
-              >
-                <BarChart2 className="h-4 w-4 shrink-0" />
-                <span className="hidden truncate sm:inline">
-                  {t("usage.title", { defaultValue: "使用统计" })}
-                </span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsDefaultTab("usage");
+                setCurrentView("settings");
+              }}
+              aria-label={t("usage.title", { defaultValue: "Usage" })}
+              title={t("usage.title", { defaultValue: "Usage" })}
+              className={cn(
+                "topbar-nav-item",
+                currentView === "settings" &&
+                  settingsDefaultTab === "usage" &&
+                  "topbar-nav-item-active",
+              )}
+            >
+              <BarChart2 className="h-4 w-4 shrink-0" />
+              <span className="hidden truncate sm:inline">
+                {t("usage.title", { defaultValue: "使用统计" })}
+              </span>
+            </button>
           </nav>
           <div
             className="ml-auto flex min-w-0 items-center justify-end gap-1.5"
@@ -730,22 +728,20 @@ function App() {
                   <ProfileSwitcher activeApp="codex" />
                 </div>
               )}
-            {isCurrentAppTakeoverActive && (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => {
-                  setSettingsDefaultTab("usage");
-                  setCurrentView("settings");
-                }}
-                title={t("usage.title", {
-                  defaultValue: "使用统计",
-                })}
-                className="hover:bg-black/5 dark:hover:bg-white/5"
-              >
-                <BarChart2 className="w-4 h-4" />
-              </Button>
-            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => {
+                setSettingsDefaultTab("usage");
+                setCurrentView("settings");
+              }}
+              title={t("usage.title", {
+                defaultValue: "使用统计",
+              })}
+              className="hover:bg-black/5 dark:hover:bg-white/5"
+            >
+              <BarChart2 className="w-4 h-4" />
+            </Button>
             <UpdateBadge
               onClick={() => {
                 setSettingsDefaultTab("about");

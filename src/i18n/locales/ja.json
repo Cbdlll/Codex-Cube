@@ -2261,7 +2261,7 @@
     "previewHide": "プレビューを閉じる",
     "formDescriptionHint": "Workflow Skill の Registered subagents セクションに書き込まれ、Codex が委任の判断に使用します。得意分野・境界・使用タイミングを記述してください。",
     "formModelBaseUrlHint": "API エンドポイント",
-    "installedStatus": "インストール済み — Workflow Skill は Codex skills にインストールされ、AGENTS.md は変更されません。任意の Codex 会話で @cube-dispatch と入力すると明示的に呼び出せます。",
+    "installedStatus": "インストール済み — Workflow Skill は Codex skills にインストールされました。任意の Codex 会話で @Cube Dispatch と入力すると明示的に呼び出せます。",
     "currentWorkerSummary": "現在のワーカー",
     "subagentDeleteFailedDetail": "Subagent の削除に失敗しました: {{detail}}",
     "subagentDeleteBlockedByWorkflow": "この Subagent は Workflow Skill で選択されています。削除する前に選択を解除してください。",

@@ -126,7 +126,9 @@ fn derive_wsl_default_mcp_path(dir: &Path) -> Option<PathBuf> {
     let is_wsl_root_default = parts.len() == 2 && parts[0] == "root" && parts[1] == ".claude";
 
     if is_wsl_home_default || is_wsl_root_default {
-        return normalized.parent().map(|parent| parent.join(".claude.json"));
+        return normalized
+            .parent()
+            .map(|parent| parent.join(".claude.json"));
     }
 
     None

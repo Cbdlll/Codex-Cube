@@ -114,14 +114,20 @@ pub fn load_manifest(config_dir: &Path) -> Result<Option<WorkflowManifest>, AppE
         )));
     }
     validate_agent_name(&manifest.worker_agent)?;
-    for name in &manifest.worker_agents { validate_agent_name(name)?; }
+    for name in &manifest.worker_agents {
+        validate_agent_name(name)?;
+    }
     Ok(Some(manifest))
 }
 
 pub fn selected_agents(config_dir: &Path) -> Result<Vec<String>, AppError> {
-    let Some(manifest) = load_manifest(config_dir)? else { return Ok(Vec::new()); };
+    let Some(manifest) = load_manifest(config_dir)? else {
+        return Ok(Vec::new());
+    };
     let mut selected = manifest.worker_agents;
-    if selected.is_empty() { selected.push(manifest.worker_agent); }
+    if selected.is_empty() {
+        selected.push(manifest.worker_agent);
+    }
     selected.retain(|name| !name.trim().is_empty());
     Ok(selected)
 }
@@ -133,7 +139,9 @@ pub fn workflow_uses_agent(config_dir: &Path, name: &str) -> Result<bool, AppErr
     }
     // 删除保护只看 Workflow Skill 的选中集合（manifest），与 AGENTS.md 无关。
     // 严格读取 manifest：损坏/不支持版本视为错误，不能当作“未选中”。
-    Ok(selected_agents(config_dir)?.iter().any(|selected| selected == name))
+    Ok(selected_agents(config_dir)?
+        .iter()
+        .any(|selected| selected == name))
 }
 
 pub fn workflow_skill_dir() -> Result<PathBuf, AppError> {
@@ -171,7 +179,11 @@ pub fn workflow_skill_metadata(content: &str) -> (Option<String>, Option<String>
 
 /// 生成 Workflow Skill 的 SKILL.md：frontmatter 只含 name/description，
 /// 正文列出所有已注册 subagent 及其描述/模型/推理档位，并标记默认 worker。
-pub fn workflow_skill_markdown(agents: &[SubagentRecord], selected: &[String], worker_agent: &str) -> String {
+pub fn workflow_skill_markdown(
+    agents: &[SubagentRecord],
+    selected: &[String],
+    worker_agent: &str,
+) -> String {
     let mut output = String::new();
     output.push_str(&format!(
         "---\n\
@@ -234,7 +246,9 @@ without concrete scope.\n\
     );
     output.push_str("## Registered subagents\n");
     for name in selected {
-        let Some(agent) = agents.iter().find(|a| &a.name == name) else { continue; };
+        let Some(agent) = agents.iter().find(|a| &a.name == name) else {
+            continue;
+        };
         let description = agent.description.trim();
         let description = if description.is_empty() {
             "(no description provided)".to_owned()
@@ -650,8 +664,22 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(instructions_path(temp.path()), "original\n").unwrap();
 
-        install(temp.path(), "worker-a", &["worker-a".to_string()], WORKFLOW_MODE_AGENTS_MD, "high").unwrap();
-        install(temp.path(), "worker-b", &["worker-b".to_string()], WORKFLOW_MODE_AGENTS_MD, "high").unwrap();
+        install(
+            temp.path(),
+            "worker-a",
+            &["worker-a".to_string()],
+            WORKFLOW_MODE_AGENTS_MD,
+            "high",
+        )
+        .unwrap();
+        install(
+            temp.path(),
+            "worker-b",
+            &["worker-b".to_string()],
+            WORKFLOW_MODE_AGENTS_MD,
+            "high",
+        )
+        .unwrap();
         cancel(temp.path()).unwrap();
 
         assert_eq!(
@@ -665,7 +693,14 @@ mod tests {
     #[test]
     fn cancel_removes_agents_md_when_it_did_not_exist_initially() {
         let temp = tempfile::tempdir().unwrap();
-        install(temp.path(), "worker", &["worker".to_string()], WORKFLOW_MODE_AGENTS_MD, "high").unwrap();
+        install(
+            temp.path(),
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_AGENTS_MD,
+            "high",
+        )
+        .unwrap();
         assert!(managed_block_matches(
             &std::fs::read_to_string(instructions_path(temp.path())).unwrap(),
             "worker",
@@ -803,7 +838,14 @@ mod tests {
     #[test]
     fn invalid_agent_names_are_rejected_before_backup() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(install(temp.path(), "../bad", &["../bad".to_string()], WORKFLOW_MODE_SKILL, "high").is_err());
+        assert!(install(
+            temp.path(),
+            "../bad",
+            &["../bad".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high"
+        )
+        .is_err());
         assert!(!backup_path(temp.path()).exists());
     }
 
@@ -812,7 +854,14 @@ mod tests {
     fn backup_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
-        install(temp.path(), "worker", &["worker".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap();
+        install(
+            temp.path(),
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
         let mode = std::fs::metadata(backup_path(temp.path()))
             .unwrap()
             .permissions()
@@ -836,7 +885,14 @@ mod tests {
         std::fs::write(&path, "user private content\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let error = install(temp.path(), "worker", &["worker".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap_err();
+        let error = install(
+            temp.path(),
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("AGENTS.md"));
         // 不可读文件未被改写，且未创建备份/清单。
         assert!(std::fs::read_to_string(&path).is_err());
@@ -867,7 +923,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = instructions_path(temp.path());
         std::fs::write(&path, "original\n").unwrap();
-        install(temp.path(), "worker", &["worker".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap();
+        install(
+            temp.path(),
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
         // AGENTS.md 变为不可读后，cancel 必须失败而不是从备份覆盖。
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
@@ -885,7 +948,14 @@ mod tests {
         let dir = temp.path();
         std::fs::write(instructions_path(dir), "keep me\n").unwrap();
         std::fs::write(backup_path(dir), "{ not json").unwrap();
-        let error = install(dir, "worker", &["worker".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap_err();
+        let error = install(
+            dir,
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("AGENTS.md 备份"));
         assert_eq!(
             std::fs::read_to_string(instructions_path(dir)).unwrap(),
@@ -897,7 +967,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
         std::fs::write(backup_path(dir), r#"{"instructionsMd": null}"#).unwrap();
-        let error = install(dir, "worker", &["worker".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap_err();
+        let error = install(
+            dir,
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("AGENTS.md 备份"));
         assert!(!instructions_path(dir).exists());
         assert!(!manifest_path(dir).exists());
@@ -906,7 +983,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
         std::fs::create_dir(backup_path(dir)).unwrap();
-        let error = install(dir, "worker", &["worker".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap_err();
+        let error = install(
+            dir,
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap_err();
         assert!(error
             .to_string()
             .contains("codex-cube-workflow-instructions-backup.json"));
@@ -1096,7 +1180,14 @@ mod tests {
         let dir = temp.path();
         std::fs::create_dir(manifest_path(dir)).unwrap();
 
-        let error = install(dir, "worker", &["worker".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap_err();
+        let error = install(
+            dir,
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("codex-cube-agent-workflow.json"));
         assert!(!backup_path(dir).exists());
         assert!(!instructions_path(dir).exists());
@@ -1135,14 +1226,17 @@ mod tests {
             ),
             test_subagent("gpt-sol-worker", "Balanced worker", "gpt-5.6-sol", "high"),
         ];
-        let markdown = workflow_skill_markdown(&agents, &["deepseek-flash".to_string(), "gpt-sol-worker".to_string()], "deepseek-flash");
+        let markdown = workflow_skill_markdown(
+            &agents,
+            &["deepseek-flash".to_string(), "gpt-sol-worker".to_string()],
+            "deepseek-flash",
+        );
 
         assert!(markdown.starts_with("---\nname: cube-dispatch\n"));
         assert!(markdown.contains("description: Use for tasks"));
         assert!(markdown.contains("delegated to registered Codex subagents"));
-        assert!(markdown.contains(
-            "dispatch registered workers by default instead of doing the work inline"
-        ));
+        assert!(markdown
+            .contains("dispatch registered workers by default instead of doing the work inline"));
         assert!(markdown.contains(
             "- `deepseek-flash`: 适合前端重构 (model: deepseek-v4-flash, reasoning: xhigh)"
         ));
@@ -1212,8 +1306,8 @@ mod tests {
         // interface/policy 会变成 null，Codex 读不到 display_name 和
         // allow_implicit_invocation（显式触发策略失效）。
         let yaml = workflow_skill_openai_yaml();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml)
-            .expect("openai.yaml 必须是合法 YAML");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("openai.yaml 必须是合法 YAML");
         assert_eq!(
             parsed["interface"]["display_name"].as_str(),
             Some("Cube Dispatch")
@@ -1247,7 +1341,14 @@ mod tests {
         );
         std::fs::write(instructions_path(dir), &original).unwrap();
 
-        install(dir, "worker-a", &["worker-a".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap();
+        install(
+            dir,
+            "worker-a",
+            &["worker-a".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
 
         let after_install = std::fs::read_to_string(instructions_path(dir)).unwrap();
         assert!(!after_install.contains(MANAGED_BLOCK_BEGIN_MARKER));
@@ -1272,7 +1373,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
 
-        install(dir, "worker", &["worker".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap();
+        install(
+            dir,
+            "worker",
+            &["worker".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
 
         assert!(!instructions_path(dir).exists());
         let manifest = load_manifest(dir).unwrap().unwrap();
@@ -1289,8 +1397,22 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(instructions_path(temp.path()), "original\n").unwrap();
 
-        install(temp.path(), "worker-a", &["worker-a".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap();
-        install(temp.path(), "worker-b", &["worker-b".to_string()], WORKFLOW_MODE_SKILL, "high").unwrap();
+        install(
+            temp.path(),
+            "worker-a",
+            &["worker-a".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
+        install(
+            temp.path(),
+            "worker-b",
+            &["worker-b".to_string()],
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
         cancel(temp.path()).unwrap();
 
         assert_eq!(

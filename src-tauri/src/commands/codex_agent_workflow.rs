@@ -49,7 +49,11 @@ fn get_status(app_state: &AppState) -> Result<CodexAgentWorkflowStatus, AppError
             .iter()
             .find(|agent| agent.name == manifest.worker_agent)
     });
-    let worker_agents = manifest.as_ref().map(|m| codex_agent_workflow::selected_agents(&config_dir)).transpose()?.unwrap_or_default();
+    let worker_agents = manifest
+        .as_ref()
+        .map(|m| codex_agent_workflow::selected_agents(&config_dir))
+        .transpose()?
+        .unwrap_or_default();
     let worker_agent = manifest
         .as_ref()
         .map(|manifest| manifest.worker_agent.clone())
@@ -77,8 +81,11 @@ fn get_status(app_state: &AppState) -> Result<CodexAgentWorkflowStatus, AppError
         .is_some_and(|manifest| manifest.mode == codex_agent_workflow::WORKFLOW_MODE_SKILL)
         && skill_installed
     {
-        let expected =
-            codex_agent_workflow::workflow_skill_markdown(&managed_agents, &worker_agents, &worker_agent);
+        let expected = codex_agent_workflow::workflow_skill_markdown(
+            &managed_agents,
+            &worker_agents,
+            &worker_agent,
+        );
         Some(expected) != skill_content
     } else {
         false
@@ -150,10 +157,20 @@ pub fn install_codex_agent_workflow(
     let config_dir = crate::codex_config::get_codex_config_dir();
     let agents = codex_subagents::list_subagents().map_err(|error| error.to_string())?;
     let mut selected = payload.worker_agents.clone();
-    if selected.is_empty() { selected.push(payload.worker_agent.trim().to_string()); }
-    selected.sort(); selected.dedup();
-    let worker_name = if payload.worker_agent.trim().is_empty() { selected.first().cloned().unwrap_or_default() } else { payload.worker_agent.trim().to_string() };
-    let worker = agents.iter().find(|agent| agent.name == worker_name).ok_or_else(|| "workflow worker 必须先注册为 Codex subagent".to_string())?;
+    if selected.is_empty() {
+        selected.push(payload.worker_agent.trim().to_string());
+    }
+    selected.sort();
+    selected.dedup();
+    let worker_name = if payload.worker_agent.trim().is_empty() {
+        selected.first().cloned().unwrap_or_default()
+    } else {
+        payload.worker_agent.trim().to_string()
+    };
+    let worker = agents
+        .iter()
+        .find(|agent| agent.name == worker_name)
+        .ok_or_else(|| "workflow worker 必须先注册为 Codex subagent".to_string())?;
     if !worker.managed {
         return Err("workflow worker 必须先由 Codex Cube 注册或采用".to_string());
     }
@@ -162,13 +179,21 @@ pub fn install_codex_agent_workflow(
         .filter(|agent| agent.managed && agent.available)
         .cloned()
         .collect();
-    if selected.is_empty() || !selected.iter().all(|name| managed_agents.iter().any(|agent| agent.name == *name)) {
+    if selected.is_empty()
+        || !selected
+            .iter()
+            .all(|name| managed_agents.iter().any(|agent| agent.name == *name))
+    {
         return Err("workflow worker 当前不可用（供应商配置缺失）".to_string());
     }
 
-    if let Err(error) =
-        install_workflow_skill(&app_state, &managed_agents, &selected, &worker.name, &config_dir)
-    {
+    if let Err(error) = install_workflow_skill(
+        &app_state,
+        &managed_agents,
+        &selected,
+        &worker.name,
+        &config_dir,
+    ) {
         // 回滚已写入的 Skill（含 DB 记录），避免半安装状态；AGENTS.md/manifest
         // 由 codex_agent_workflow::install 自身的原子回滚负责恢复。
         if app_state
@@ -212,7 +237,8 @@ pub(crate) fn install_workflow_skill(
     let agents_dir = skill_dir.join("agents");
     let result = (|| -> Result<(), AppError> {
         std::fs::create_dir_all(&agents_dir).map_err(|error| AppError::io(&agents_dir, error))?;
-        let markdown = codex_agent_workflow::workflow_skill_markdown(agents, selected, worker_agent);
+        let markdown =
+            codex_agent_workflow::workflow_skill_markdown(agents, selected, worker_agent);
         crate::config::write_text_file(&skill_dir.join("SKILL.md"), &markdown)?;
         crate::config::write_text_file(
             &agents_dir.join("openai.yaml"),

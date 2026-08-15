@@ -403,8 +403,7 @@ pub fn validate_payload(payload: &SubagentUpsertPayload) -> Result<(), AppError>
         }
         // 自定义 subagent 只支持 Responses：协作子代理任务派发依赖 native
         // Responses 路径的明文处理，Chat/Anthropic 转换路径下 worker 收不到任务。
-        let normalized =
-            crate::proxy::providers::normalize_codex_wire_api(wire_api);
+        let normalized = crate::proxy::providers::normalize_codex_wire_api(wire_api);
         if normalized != Some("responses") {
             return Err(AppError::InvalidInput(format!(
                 "自定义 subagent 仅支持 Responses 协议；wire_api {:?}（Chat Completions / Anthropic）不受支持，Codex 协作子代理任务派发依赖 Responses 明文处理",
@@ -425,7 +424,12 @@ fn unique_subagent_identity(
     base_provider: &str,
 ) -> (String, String) {
     let name_taken = |name: &str| manifest.agents.iter().any(|record| record.name == name);
-    let provider_taken = |id: &str| manifest.agents.iter().any(|record| record.provider_id == id);
+    let provider_taken = |id: &str| {
+        manifest
+            .agents
+            .iter()
+            .any(|record| record.provider_id == id)
+    };
     if !name_taken(base_name) && !provider_taken(base_provider) {
         return (base_name.to_owned(), base_provider.to_owned());
     }
@@ -935,20 +939,27 @@ fn upsert_subagent_in(
     // 编辑判定：同名且同内部 provider id 才是编辑；同名但 provider 不同视为
     // 新注册（同模型不同供应商的重复场景），后端追加其他字段后缀生成唯一
     // name/provider，避免第二个覆盖第一个的 agent 文件与 manifest 记录。
-    let is_edit = existing_by_name.as_ref().is_some_and(|record| {
-        record.provider_id == payload.model_provider_id.trim()
-    });
+    let is_edit = existing_by_name
+        .as_ref()
+        .is_some_and(|record| record.provider_id == payload.model_provider_id.trim());
     // 编辑受管 subagent 时，manifest 中的 provider_id 是权威：忽略 payload 漂移
     // （前端/旧 payload 携带的 modelProviderId），强制使用稳定 ID 并写回。
     if is_edit {
         if let Some(record) = existing_by_name.as_ref() {
-            validate_manifest_key_path(config_dir, &record.provider_id, record.key_path.as_deref())?;
+            validate_manifest_key_path(
+                config_dir,
+                &record.provider_id,
+                record.key_path.as_deref(),
+            )?;
             payload.model_provider_id = record.provider_id.trim().to_owned();
         }
     } else {
         // 新建：name / 内部 provider id 被现有记录占用时追加后缀去重。
-        let (final_name, final_provider) =
-            unique_subagent_identity(&manifest, payload.name.trim(), payload.model_provider_id.trim());
+        let (final_name, final_provider) = unique_subagent_identity(
+            &manifest,
+            payload.name.trim(),
+            payload.model_provider_id.trim(),
+        );
         payload.name = final_name;
         payload.model_provider_id = final_provider;
     }
@@ -2482,13 +2493,8 @@ mod custom_provider_tests {
         for wire_api in ["chat", "anthropic", "chat_completions"] {
             let mut invalid = payload("flash-worker", "internal-deepseek", Some("sk-agent"));
             invalid.wire_api = Some(wire_api.to_owned());
-            let error = upsert_subagent_in(
-                config_dir,
-                &config_path(config_dir),
-                "",
-                &invalid,
-            )
-            .expect_err("非 Responses wire_api 必须被拒绝");
+            let error = upsert_subagent_in(config_dir, &config_path(config_dir), "", &invalid)
+                .expect_err("非 Responses wire_api 必须被拒绝");
             assert!(
                 error.to_string().contains("仅支持 Responses"),
                 "错误信息应说明仅支持 Responses: {error}"
@@ -2670,8 +2676,7 @@ wire_api = "responses"
         assert_eq!(second.model_provider_id, "internal-gpt");
         // 原始 agent 文件与 key 未被覆盖。
         assert_eq!(
-            std::fs::read_to_string(provider_key_path_in(config_dir, "internal-deepseek"))
-                .unwrap(),
+            std::fs::read_to_string(provider_key_path_in(config_dir, "internal-deepseek")).unwrap(),
             "sk-one"
         );
         assert_eq!(

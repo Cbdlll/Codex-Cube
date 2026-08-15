@@ -1428,10 +1428,7 @@ base_url = "https://proxy.example/v1"
         db.save_provider("codex", &official).expect("save official");
 
         let source_provider_ids = collect_source_model_provider_ids(&db).expect("collect ids");
-        assert_eq!(
-            source_provider_ids,
-            source_ids(&["aihubmix", "rightcode"])
-        );
+        assert_eq!(source_provider_ids, source_ids(&["aihubmix", "rightcode"]));
 
         let session_dir = codex_dir.join("sessions/2026/05/28");
         fs::create_dir_all(&session_dir).expect("create session dir");
@@ -2311,7 +2308,6 @@ model = "gpt-5.4"
         let (second, _second_backup_dir) = migrate_provider_templates_for_test(&db);
         assert!(second.migrated_provider_ids.is_empty());
     }
-
 
     #[test]
     fn skips_unknown_stored_provider_template() {

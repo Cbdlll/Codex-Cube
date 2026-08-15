@@ -341,7 +341,7 @@ export function AgentsPanel(_props: AgentsPanelProps) {
             dot: "bg-emerald-500",
             text: t("agents.installedStatus", {
               defaultValue:
-                "Installed — the Workflow Skill is installed into Codex skills. Invoke it explicitly with @cube-dispatch in any Codex conversation.",
+                "Installed — the Workflow Skill is installed into Codex skills. Invoke it explicitly with @Cube Dispatch in any Codex conversation.",
             }),
           };
 
@@ -374,7 +374,7 @@ export function AgentsPanel(_props: AgentsPanelProps) {
                       </Badge>
                     )}
                   </div>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
+                  <p className="mt-0.5 whitespace-pre-line text-xs text-muted-foreground">
                     {t("agents.workflowDescription", {
                       defaultValue:
                         "Register cheap models as officially supported Codex subagents, pick one as the default worker, and install the Workflow Skill so Codex knows what each subagent is specialized in.",
@@ -737,7 +737,7 @@ export function AgentsPanel(_props: AgentsPanelProps) {
                   status?.installed
                     ? t("agents.installedStatus", {
                         defaultValue:
-                          "Installed — the Workflow Skill is installed into Codex skills. Invoke it explicitly with @cube-dispatch in any Codex conversation.",
+                          "Installed — the Workflow Skill is installed into Codex skills. Invoke it explicitly with @Cube Dispatch in any Codex conversation.",
                       })
                     : t("agents.notInstalledStatus", {
                         defaultValue:

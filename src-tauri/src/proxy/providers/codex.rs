@@ -347,10 +347,7 @@ pub fn resolve_codex_aggregate_provider(
         } else if member_lacks_upstream_model {
             let model_id = entry.model.split('@').next().unwrap_or(&entry.model).trim();
             if !model_id.is_empty() {
-                obj.insert(
-                    "model".to_string(),
-                    JsonValue::String(model_id.to_string()),
-                );
+                obj.insert("model".to_string(), JsonValue::String(model_id.to_string()));
             }
         }
         // 显式自定义映射标记（仅内存中的请求克隆，不落库）：让

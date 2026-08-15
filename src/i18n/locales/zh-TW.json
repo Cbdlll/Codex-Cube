@@ -2262,7 +2262,7 @@
     "previewHide": "收起預覽",
     "formDescriptionHint": "會寫入 Workflow Skill 的 Registered subagents 段落，Codex 據此決定何時委派。請描述擅長領域、邊界與使用時機。",
     "formModelBaseUrlHint": "API 位址",
-    "installedStatus": "已安裝——Workflow Skill 已安裝到 Codex skills，AGENTS.md 不會被改寫；在任意 Codex 對話中輸入 @cube-dispatch 即可顯式呼叫該工作流。",
+    "installedStatus": "已安裝——Workflow Skill 已安裝到 Codex skills；在任意 Codex 對話中輸入 @Cube Dispatch 即可顯式呼叫該工作流。",
     "currentWorkerSummary": "目前 Worker",
     "subagentDeleteFailedDetail": "刪除 Subagent 失敗：{{detail}}",
     "subagentDeleteBlockedByWorkflow": "該 Subagent 正被 Workflow Skill 選中；請先取消選中後再刪除。",
