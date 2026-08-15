@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="knot" x1="150" y1="150" x2="874" y2="874" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2DD4BF"/>
+      <stop offset="0.45" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#60A5FA"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="#FFFFFF"/>
+  <path d="M 650.564 357.000 A 160 160 0 0 1 512.000 437.000" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 650.564 357.000 A 160 160 0 0 1 512.000 437.000" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 373.436 357.000 A 160 160 0 0 1 512.000 117.000" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 373.436 357.000 A 160 160 0 0 1 512.000 117.000" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 715.516 554.500 A 160 160 0 0 1 576.952 474.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 715.516 554.500 A 160 160 0 0 1 576.952 474.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 576.952 314.500 A 160 160 0 0 1 854.080 314.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 576.952 314.500 A 160 160 0 0 1 854.080 314.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 715.516 469.500 A 160 160 0 0 1 854.080 709.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 715.516 469.500 A 160 160 0 0 1 854.080 709.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 576.952 709.500 A 160 160 0 0 1 576.952 549.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 576.952 709.500 A 160 160 0 0 1 576.952 549.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 650.564 667.000 A 160 160 0 0 1 512.000 907.000" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 650.564 667.000 A 160 160 0 0 1 512.000 907.000" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 373.436 667.000 A 160 160 0 0 1 512.000 587.000" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 373.436 667.000 A 160 160 0 0 1 512.000 587.000" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 308.484 469.500 A 160 160 0 0 1 447.048 549.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 308.484 469.500 A 160 160 0 0 1 447.048 549.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 447.048 709.500 A 160 160 0 0 1 169.920 709.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 447.048 709.500 A 160 160 0 0 1 169.920 709.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 447.048 314.500 A 160 160 0 0 1 447.048 474.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 447.048 314.500 A 160 160 0 0 1 447.048 474.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 308.484 554.500 A 160 160 0 0 1 169.920 314.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 308.484 554.500 A 160 160 0 0 1 169.920 314.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 512.000 117.000 A 160 160 0 0 1 650.564 357.000" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 512.000 117.000 A 160 160 0 0 1 650.564 357.000" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 512.000 437.000 A 160 160 0 0 1 373.436 357.000" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 512.000 437.000 A 160 160 0 0 1 373.436 357.000" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 854.080 314.500 A 160 160 0 0 1 715.516 554.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 854.080 314.500 A 160 160 0 0 1 715.516 554.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 576.952 474.500 A 160 160 0 0 1 576.952 314.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 576.952 474.500 A 160 160 0 0 1 576.952 314.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 576.952 549.500 A 160 160 0 0 1 715.516 469.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 576.952 549.500 A 160 160 0 0 1 715.516 469.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 854.080 709.500 A 160 160 0 0 1 576.952 709.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 854.080 709.500 A 160 160 0 0 1 576.952 709.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 512.000 587.000 A 160 160 0 0 1 650.564 667.000" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 512.000 587.000 A 160 160 0 0 1 650.564 667.000" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 512.000 907.000 A 160 160 0 0 1 373.436 667.000" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 512.000 907.000 A 160 160 0 0 1 373.436 667.000" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 447.048 549.500 A 160 160 0 0 1 447.048 709.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 447.048 549.500 A 160 160 0 0 1 447.048 709.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 169.920 709.500 A 160 160 0 0 1 308.484 469.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 169.920 709.500 A 160 160 0 0 1 308.484 469.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 447.048 474.500 A 160 160 0 0 1 308.484 554.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 447.048 474.500 A 160 160 0 0 1 308.484 554.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+  <path d="M 169.920 314.500 A 160 160 0 0 1 447.048 314.500" fill="none" stroke="#B4C5DB" stroke-width="88" stroke-linecap="round"/>
+  <path d="M 169.920 314.500 A 160 160 0 0 1 447.048 314.500" fill="none" stroke="url(#knot)" stroke-width="76" stroke-linecap="round"/>
+</svg>

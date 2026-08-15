@@ -1,0 +1,277 @@
+#![allow(non_snake_case)]
+
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
+
+use crate::app_config::AppType;
+use crate::codex_config;
+use crate::config::{self, ConfigStatus};
+use crate::settings;
+use crate::store::AppState;
+
+use std::str::FromStr;
+
+fn invalid_json_format_error(error: serde_json::Error) -> String {
+    let lang = settings::get_settings()
+        .language
+        .unwrap_or_else(|| "zh".to_string());
+
+    match lang.as_str() {
+        "en" => format!("Invalid JSON format: {error}"),
+        "ja" => format!("JSON形式が無効です: {error}"),
+        _ => format!("无效的 JSON 格式: {error}"),
+    }
+}
+
+fn invalid_toml_format_error(error: toml_edit::TomlError) -> String {
+    let lang = settings::get_settings()
+        .language
+        .unwrap_or_else(|| "zh".to_string());
+
+    match lang.as_str() {
+        "en" => format!("Invalid TOML format: {error}"),
+        "ja" => format!("TOML形式が無効です: {error}"),
+        _ => format!("无效的 TOML 格式: {error}"),
+    }
+}
+
+fn validate_common_config_snippet(app_type: &str, snippet: &str) -> Result<(), String> {
+    if snippet.trim().is_empty() {
+        return Ok(());
+    }
+
+    match app_type {
+        "codex" => {
+            snippet
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(invalid_toml_format_error)?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_config_status(
+    state: State<'_, AppState>,
+    app: String,
+) -> Result<ConfigStatus, String> {
+    match AppType::from_str(&app).map_err(|e| e.to_string())? {
+        AppType::Codex => {
+            let auth_path = codex_config::get_codex_auth_path();
+            let config_text = codex_config::read_codex_config_text().unwrap_or_default();
+            let exists = auth_path.exists() || !config_text.trim().is_empty();
+            let path = codex_config::get_codex_config_dir()
+                .to_string_lossy()
+                .to_string();
+
+            Ok(ConfigStatus { exists, path })
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_config_dir(app: String) -> Result<String, String> {
+    let dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
+        AppType::Codex => codex_config::get_codex_config_dir(),
+    };
+
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
+    let config_dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
+        AppType::Codex => codex_config::get_codex_config_dir(),
+    };
+
+    if !config_dir.exists() {
+        std::fs::create_dir_all(&config_dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+
+    handle
+        .opener()
+        .open_path(config_dir.to_string_lossy().to_string(), None::<String>)
+        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn pick_directory(
+    app: AppHandle,
+    #[allow(non_snake_case)] defaultPath: Option<String>,
+) -> Result<Option<String>, String> {
+    let initial = defaultPath
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut builder = app.dialog().file();
+        if let Some(path) = initial {
+            builder = builder.set_directory(path);
+        }
+        builder.blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| format!("弹出目录选择器失败: {e}"))?;
+
+    match result {
+        Some(file_path) => {
+            let resolved = file_path
+                .simplified()
+                .into_path()
+                .map_err(|e| format!("解析选择的目录失败: {e}"))?;
+            Ok(Some(resolved.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+pub async fn get_app_config_path() -> Result<String, String> {
+    let config_path = config::get_app_config_path();
+    Ok(config_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn open_app_config_folder(handle: AppHandle) -> Result<bool, String> {
+    let config_dir = config::get_app_config_dir();
+
+    if !config_dir.exists() {
+        std::fs::create_dir_all(&config_dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+
+    handle
+        .opener()
+        .open_path(config_dir.to_string_lossy().to_string(), None::<String>)
+        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn get_common_config_snippet(
+    app_type: String,
+    state: tauri::State<'_, crate::store::AppState>,
+) -> Result<Option<String>, String> {
+    state
+        .db
+        .get_config_snippet(&app_type)
+        .map_err(|e| e.to_string())
+}
+
+/// 对前端编辑器里的 config.toml 文本做通用配置片段的合并/剥离。
+/// 放后端是为了走 toml_edit（保注释、保键序）；前端 smol-toml 的
+/// 整文档重序列化会破坏用户手写格式。
+#[tauri::command]
+pub async fn update_toml_common_config_snippet(
+    config_toml: String,
+    snippet_toml: String,
+    enabled: bool,
+) -> Result<String, String> {
+    crate::services::provider::update_toml_common_config_snippet(
+        &config_toml,
+        &snippet_toml,
+        enabled,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_common_config_snippet(
+    app_type: String,
+    snippet: String,
+    state: tauri::State<'_, crate::store::AppState>,
+) -> Result<(), String> {
+    let is_cleared = snippet.trim().is_empty();
+    let old_snippet = state
+        .db
+        .get_config_snippet(&app_type)
+        .map_err(|e| e.to_string())?;
+
+    validate_common_config_snippet(&app_type, &snippet)?;
+
+    let value = if is_cleared { None } else { Some(snippet) };
+
+    if app_type == "codex" {
+        if let Some(legacy_snippet) = old_snippet
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
+            crate::services::provider::ProviderService::migrate_legacy_common_config_usage(
+                state.inner(),
+                app,
+                legacy_snippet,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    state
+        .db
+        .set_config_snippet(&app_type, value)
+        .map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_config_snippet_cleared(&app_type, is_cleared)
+        .map_err(|e| e.to_string())?;
+
+    if app_type == "codex" {
+        let app = AppType::from_str(&app_type).map_err(|e| e.to_string())?;
+        crate::services::provider::ProviderService::sync_current_provider_for_app(
+            state.inner(),
+            app,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_common_config_snippet;
+
+    #[test]
+    fn validate_common_config_snippet_accepts_comment_only_codex_snippet() {
+        validate_common_config_snippet("codex", "# comment only\n")
+            .expect("comment-only codex snippet should be valid");
+    }
+
+    #[test]
+    fn validate_common_config_snippet_rejects_invalid_codex_snippet() {
+        let err = validate_common_config_snippet("codex", "[broken")
+            .expect_err("invalid codex snippet should be rejected");
+        assert!(
+            err.contains("TOML") || err.contains("toml") || err.contains("格式"),
+            "expected TOML validation error, got {err}"
+        );
+    }
+}
+
+#[tauri::command]
+pub async fn extract_common_config_snippet(
+    appType: String,
+    settingsConfig: Option<String>,
+    state: tauri::State<'_, crate::store::AppState>,
+) -> Result<String, String> {
+    let app = AppType::from_str(&appType).map_err(|e| e.to_string())?;
+
+    if let Some(settings_config) = settingsConfig.filter(|s| !s.trim().is_empty()) {
+        let settings: serde_json::Value =
+            serde_json::from_str(&settings_config).map_err(invalid_json_format_error)?;
+
+        return crate::services::provider::ProviderService::extract_common_config_snippet_from_settings(
+            app,
+            &settings,
+        )
+        .map_err(|e| e.to_string());
+    }
+
+    crate::services::provider::ProviderService::extract_common_config_snippet(&state, app)
+        .map_err(|e| e.to_string())
+}
