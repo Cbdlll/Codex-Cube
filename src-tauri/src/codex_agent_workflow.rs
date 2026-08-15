@@ -289,9 +289,18 @@ worker otherwise.\n\
 to continue) when available, or the app thread tools (`create_thread` + \
 `send_message_to_thread` + `wait_threads`) when those are the only subagent tools exposed. \
 Never call a tool that is not in the current tool list.\n\
-- Pass `model` and `reasoning_effort` explicitly with the registered per-agent values. \
-Resolution order: explicit spawn value > custom agent file > `[agents]` defaults \
-(`default_subagent_model`, `default_subagent_reasoning_effort`) > parent value.\n\
+- Inspect the current spawn tool schema before dispatching. If the selected registered agent \
+name appears in the allowed `agent_type` values, pass that exact name as `agent_type`; this is \
+the primary path and loads the custom agent file directly.\n\
+- If the registered name is not an allowed `agent_type`, use the allowed generic `worker` role \
+and pass `model` and `reasoning_effort` explicitly with the registered per-agent values. This \
+is a compatibility fallback for sessions whose tool schema does not expose custom agent types. \
+Never invent or pass an `agent_type` value absent from the current schema.\n\
+- For fallback dispatch, resolution order is: explicit spawn value > custom agent file > `[agents]` \
+defaults (`default_subagent_model`, `default_subagent_reasoning_effort`) > parent value.\n\
+- Treat a successful compatibility fallback as normal dispatch; do not add a user-facing caveat \
+solely because the registered custom `agent_type` was unavailable. Report it only if delegation \
+fails or the fallback changes requested behavior.\n\
 - Use the same registered reasoning_effort on every round and when resuming; never let \
 the worker run at a different effort than registered.\n\
 - Codex handles spawning, follow-up routing, waiting for results, and closing threads; \
@@ -1257,6 +1266,15 @@ mod tests {
         assert!(markdown.contains("## Triggering"));
         assert!(markdown.contains("## Spawning protocol"));
         assert!(markdown.contains("fork_turns=\"none\""));
+        assert!(markdown.contains(
+            "If the selected registered agent name appears in the allowed `agent_type` values"
+        ));
+        assert!(markdown.contains("pass that exact name as `agent_type`"));
+        assert!(markdown.contains("use the allowed generic `worker` role"));
+        assert!(markdown.contains("pass `model` and `reasoning_effort` explicitly"));
+        assert!(markdown
+            .contains("Never invent or pass an `agent_type` value absent from the current schema"));
+        assert!(markdown.contains("do not add a user-facing caveat"));
         assert!(markdown.contains("max_concurrent_threads_per_session"));
         assert!(markdown.contains("## Worker lifecycle"));
         assert!(markdown.contains("followup_task"));
