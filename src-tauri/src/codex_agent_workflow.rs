@@ -34,12 +34,67 @@ pub struct WorkflowManifest {
     pub worker_agent: String,
     #[serde(default)]
     pub worker_agents: Vec<String>,
+    /// 角色 → agent 映射（worker / explorer / default）；旧 manifest 无此字段时由
+    /// worker_agents / worker_agent 推导，保持向后兼容。
+    #[serde(default)]
+    pub role_agents: RoleAgents,
     /// "skill"（新式 Workflow Skill）或遗留 "agents-md"（AGENTS.md 注入）。
     #[serde(default = "default_workflow_mode")]
     pub mode: String,
     /// 新式安装时写入的 Skill 目录名。
     #[serde(default = "default_skill_directory")]
     pub skill_directory: String,
+}
+
+/// 角色 → 注册 subagent 列表（顺序即优先级）。三个官方内置角色：
+/// worker（实现/执行）、explorer（只读探索）、default（通用兜底）。
+/// 同一个 subagent 可出现在多个角色中（复用）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleAgents {
+    #[serde(default)]
+    pub worker: Vec<String>,
+    #[serde(default)]
+    pub explorer: Vec<String>,
+    #[serde(default)]
+    pub default: Vec<String>,
+}
+
+impl RoleAgents {
+    /// 全部角色选中的 agent（去重、保持角色顺序：default > worker > explorer）。
+    pub fn union(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for name in self
+            .default
+            .iter()
+            .chain(self.worker.iter())
+            .chain(self.explorer.iter())
+        {
+            let name = name.trim();
+            if name.is_empty() || !seen.insert(name.to_owned()) {
+                continue;
+            }
+            out.push(name.to_owned());
+        }
+        out
+    }
+
+    /// 是否没有任何角色选中。
+    pub fn is_empty(&self) -> bool {
+        self.worker.is_empty() && self.explorer.is_empty() && self.default.is_empty()
+    }
+}
+
+/// 默认 worker：default 角色第一个 → worker 角色第一个 → explorer 角色第一个 → 空。
+pub fn derive_worker_agent(role_agents: &RoleAgents) -> String {
+    role_agents
+        .default
+        .first()
+        .or_else(|| role_agents.worker.first())
+        .or_else(|| role_agents.explorer.first())
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +172,15 @@ pub fn load_manifest(config_dir: &Path) -> Result<Option<WorkflowManifest>, AppE
     for name in &manifest.worker_agents {
         validate_agent_name(name)?;
     }
+    for name in manifest
+        .role_agents
+        .default
+        .iter()
+        .chain(manifest.role_agents.worker.iter())
+        .chain(manifest.role_agents.explorer.iter())
+    {
+        validate_agent_name(name)?;
+    }
     Ok(Some(manifest))
 }
 
@@ -124,9 +188,12 @@ pub fn selected_agents(config_dir: &Path) -> Result<Vec<String>, AppError> {
     let Some(manifest) = load_manifest(config_dir)? else {
         return Ok(Vec::new());
     };
-    let mut selected = manifest.worker_agents;
+    let mut selected = manifest.role_agents.union();
     if selected.is_empty() {
-        selected.push(manifest.worker_agent);
+        selected = manifest.worker_agents;
+    }
+    if selected.is_empty() && !manifest.worker_agent.trim().is_empty() {
+        selected.push(manifest.worker_agent.trim().to_owned());
     }
     selected.retain(|name| !name.trim().is_empty());
     Ok(selected)
@@ -178,10 +245,11 @@ pub fn workflow_skill_metadata(content: &str) -> (Option<String>, Option<String>
 }
 
 /// 生成 Workflow Skill 的 SKILL.md：frontmatter 只含 name/description，
-/// 正文列出所有已注册 subagent 及其描述/模型/推理档位，并标记默认 worker。
+/// 正文按角色（worker / explorer / default）列出已注册 subagent 及其模型/推理档位，
+/// 并标记默认 worker。角色映射决定派发路由与 fallback 的 agent_type。
 pub fn workflow_skill_markdown(
     agents: &[SubagentRecord],
-    selected: &[String],
+    role_agents: &RoleAgents,
     worker_agent: &str,
 ) -> String {
     let mut output = String::new();
@@ -220,8 +288,11 @@ agents (default, worker, explorer).\n\n",
         "## Roles\n\
 - The coordinator - the model running the current conversation - owns requirements, planning, \
 architecture, task decomposition, integration, and final review (acceptance).\n\
-- A worker is a registered subagent that executes one delegated scope and reports results.\n\
-- Top-level decisions are not delegated to workers.\n\n",
+- A worker executes one delegated implementation/testing scope and reports results.\n\
+- An explorer investigates a scoped question read-only (codebase questions, research, triage, \
+review) and reports findings and evidence.\n\
+- A default (general-purpose) agent handles bounded tasks that match neither role.\n\
+- Top-level decisions are not delegated to subagents.\n\n",
     );
     output.push_str(
         "## Triggering\n\
@@ -245,20 +316,29 @@ without concrete scope.\n\
 4. Wait for all workers, then integrate, verify with tests, and report.\n\n",
     );
     output.push_str("## Registered subagents\n");
-    for name in selected {
-        let Some(agent) = agents.iter().find(|a| &a.name == name) else {
+    output.push_str(
+        "- Roles are assigned in Codex Cube: each registered subagent can serve one or more \
+of the `worker` / `explorer` / `default` roles, and the same subagent may be listed under \
+multiple roles.\n",
+    );
+    for (role, names) in [
+        ("worker", &role_agents.worker),
+        ("explorer", &role_agents.explorer),
+        ("default", &role_agents.default),
+    ] {
+        if names.is_empty() {
             continue;
-        };
-        let description = agent.description.trim();
-        let description = if description.is_empty() {
-            "(no description provided)".to_owned()
-        } else {
-            agent.description.to_owned()
-        };
-        output.push_str(&format!(
-            "- `{}`: {} (model: {}, reasoning: {})\n",
-            agent.name, description, agent.model, agent.reasoning_effort
-        ));
+        }
+        output.push_str(&format!("- **{role}:**\n"));
+        for name in names {
+            let Some(agent) = agents.iter().find(|a| &a.name == name) else {
+                continue;
+            };
+            output.push_str(&format!(
+                "  - `{}` (model: {}, reasoning: {})\n",
+                agent.name, agent.model, agent.reasoning_effort
+            ));
+        }
     }
     output.push_str(&format!("\n**Default worker:** `{worker_agent}`\n\n"));
     output.push_str(
@@ -275,8 +355,11 @@ triage, summarization).\n\n",
     output.push_str(
         "## Delegation rules\n\
 - Delegate suitable bounded implementation, review, exploration, testing, or research subtasks.\n\
-- Choose the registered subagent whose description matches the work; use the default \
-worker otherwise.\n\
+- Pick the subagent by registered role: implementation/testing and other write work → the \
+`worker` role list (first listed agent wins); exploration, codebase questions, review, triage, \
+research → the `explorer` role list; bounded tasks matching neither → the `default` role list.\n\
+- If the preferred role list is empty or its agents are unavailable, fall back to the next \
+role list (`worker` → `default` → `explorer`), then to the default worker.\n\
 - Assign explicit, non-overlapping write scopes before spawning.\n\
 - Wait for all required results and keep the main thread focused on planning and review.\n\n",
     );
@@ -292,10 +375,12 @@ Never call a tool that is not in the current tool list.\n\
 - Inspect the current spawn tool schema before dispatching. If the selected registered agent \
 name appears in the allowed `agent_type` values, pass that exact name as `agent_type`; this is \
 the primary path and loads the custom agent file directly.\n\
-- If the registered name is not an allowed `agent_type`, use the allowed generic `worker` role \
-and pass `model` and `reasoning_effort` explicitly with the registered per-agent values. This \
-is a compatibility fallback for sessions whose tool schema does not expose custom agent types. \
-Never invent or pass an `agent_type` value absent from the current schema.\n\
+- If the registered name is not an allowed `agent_type`, use the allowed generic role matching \
+the subagent's registered type (`worker` for worker-typed, `explorer` for explorer-typed, \
+`default` for default-typed) and pass `model` and `reasoning_effort` explicitly with the \
+registered per-agent values. This is a compatibility fallback for sessions whose tool schema \
+does not expose custom agent types. Never invent or pass an `agent_type` value absent from \
+the current schema.\n\
 - For fallback dispatch, resolution order is: explicit spawn value > custom agent file > `[agents]` \
 defaults (`default_subagent_model`, `default_subagent_reasoning_effort`) > parent value.\n\
 - Treat a successful compatibility fallback as normal dispatch; do not add a user-facing caveat \
@@ -395,6 +480,7 @@ pub fn install(
     config_dir: &Path,
     worker_agent: &str,
     worker_agents: &[String],
+    role_agents: &RoleAgents,
     mode: &str,
     reasoning_effort: &str,
 ) -> Result<(), AppError> {
@@ -415,6 +501,7 @@ pub fn install(
             version: 1,
             worker_agent: worker_agent.to_owned(),
             worker_agents: worker_agents.to_vec(),
+            role_agents: role_agents.clone(),
             mode: WORKFLOW_MODE_SKILL.to_string(),
             skill_directory: WORKFLOW_SKILL_DIRECTORY.to_string(),
         };
@@ -429,6 +516,7 @@ pub fn install(
             version: 1,
             worker_agent: worker_agent.to_owned(),
             worker_agents: worker_agents.to_vec(),
+            role_agents: role_agents.clone(),
             mode: WORKFLOW_MODE_AGENTS_MD.to_string(),
             skill_directory: WORKFLOW_SKILL_DIRECTORY.to_string(),
         };
@@ -677,6 +765,7 @@ mod tests {
             temp.path(),
             "worker-a",
             &["worker-a".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_AGENTS_MD,
             "high",
         )
@@ -685,6 +774,7 @@ mod tests {
             temp.path(),
             "worker-b",
             &["worker-b".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_AGENTS_MD,
             "high",
         )
@@ -706,6 +796,7 @@ mod tests {
             temp.path(),
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_AGENTS_MD,
             "high",
         )
@@ -851,6 +942,7 @@ mod tests {
             temp.path(),
             "../bad",
             &["../bad".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high"
         )
@@ -867,6 +959,7 @@ mod tests {
             temp.path(),
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -898,6 +991,7 @@ mod tests {
             temp.path(),
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -936,6 +1030,7 @@ mod tests {
             temp.path(),
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -961,6 +1056,7 @@ mod tests {
             dir,
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -980,6 +1076,7 @@ mod tests {
             dir,
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -996,6 +1093,7 @@ mod tests {
             dir,
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -1056,6 +1154,7 @@ mod tests {
             version: 1,
             worker_agent: "worker".to_owned(),
             worker_agents: Vec::new(),
+            role_agents: RoleAgents::default(),
             mode: WORKFLOW_MODE_AGENTS_MD.to_string(),
             skill_directory: WORKFLOW_SKILL_DIRECTORY.to_string(),
         };
@@ -1094,6 +1193,7 @@ mod tests {
                 version: 1,
                 worker_agent: "worker".to_owned(),
                 worker_agents: vec!["worker".to_owned()],
+                role_agents: RoleAgents::default(),
                 mode: WORKFLOW_MODE_SKILL.to_string(),
                 skill_directory: WORKFLOW_SKILL_DIRECTORY.to_string(),
             })
@@ -1112,6 +1212,7 @@ mod tests {
             version: 1,
             worker_agent: "worker-long".to_owned(),
             worker_agents: vec!["worker-long".to_owned(), "review-worker".to_owned()],
+            role_agents: RoleAgents::default(),
             mode: WORKFLOW_MODE_SKILL.to_string(),
             skill_directory: WORKFLOW_SKILL_DIRECTORY.to_string(),
         };
@@ -1173,6 +1274,7 @@ mod tests {
                 version: 1,
                 worker_agent: "worker".to_owned(),
                 worker_agents: Vec::new(),
+                role_agents: RoleAgents::default(),
                 mode: WORKFLOW_MODE_SKILL.to_string(),
                 skill_directory: WORKFLOW_SKILL_DIRECTORY.to_string(),
             })
@@ -1193,6 +1295,7 @@ mod tests {
             dir,
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -1221,11 +1324,12 @@ mod tests {
             sandbox_mode: "inherit".to_string(),
             reasoning_effort: reasoning_effort.to_string(),
             wire_api: "responses".to_string(),
+            agent_type: "worker".to_string(),
         }
     }
 
     #[test]
-    fn workflow_skill_markdown_lists_agents_and_default_worker() {
+    fn workflow_skill_markdown_lists_role_mapping_and_default_worker() {
         let agents = vec![
             test_subagent(
                 "deepseek-flash",
@@ -1234,23 +1338,34 @@ mod tests {
                 "xhigh",
             ),
             test_subagent("gpt-sol-worker", "Balanced worker", "gpt-5.6-sol", "high"),
+            test_subagent(
+                "explorer-agent",
+                "Codebase questions",
+                "deepseek-v4-flash",
+                "max",
+            ),
         ];
-        let markdown = workflow_skill_markdown(
-            &agents,
-            &["deepseek-flash".to_string(), "gpt-sol-worker".to_string()],
-            "deepseek-flash",
-        );
+        let mut role_agents = RoleAgents::default();
+        role_agents.worker = vec!["deepseek-flash".to_string(), "gpt-sol-worker".to_string()];
+        role_agents.explorer = vec!["explorer-agent".to_string()];
+        let markdown = workflow_skill_markdown(&agents, &role_agents, "deepseek-flash");
 
         assert!(markdown.starts_with("---\nname: cube-dispatch\n"));
         assert!(markdown.contains("description: Use for tasks"));
         assert!(markdown.contains("delegated to registered Codex subagents"));
         assert!(markdown
             .contains("dispatch registered workers by default instead of doing the work inline"));
-        assert!(markdown.contains(
-            "- `deepseek-flash`: 适合前端重构 (model: deepseek-v4-flash, reasoning: xhigh)"
-        ));
-        assert!(markdown
-            .contains("- `gpt-sol-worker`: Balanced worker (model: gpt-5.6-sol, reasoning: high)"));
+        assert!(markdown.contains("- **worker:**"));
+        assert!(
+            markdown.contains("  - `deepseek-flash` (model: deepseek-v4-flash, reasoning: xhigh)")
+        );
+        assert!(markdown.contains("  - `gpt-sol-worker` (model: gpt-5.6-sol, reasoning: high)"));
+        assert!(markdown.contains("- **explorer:**"));
+        assert!(
+            markdown.contains("  - `explorer-agent` (model: deepseek-v4-flash, reasoning: max)")
+        );
+        assert!(!markdown.contains("- **default:**"));
+        assert!(markdown.contains("same subagent may be listed under multiple roles"));
         assert!(markdown.contains("**Default worker:** `deepseek-flash`"));
         assert!(markdown.contains("## Dispatch flow (execute on activation)"));
         assert!(markdown.contains("1. Decompose the user's request"));
@@ -1270,8 +1385,10 @@ mod tests {
             "If the selected registered agent name appears in the allowed `agent_type` values"
         ));
         assert!(markdown.contains("pass that exact name as `agent_type`"));
-        assert!(markdown.contains("use the allowed generic `worker` role"));
+        assert!(markdown.contains("use the allowed generic role matching"));
+        assert!(markdown.contains("`worker` for worker-typed, `explorer` for explorer-typed"));
         assert!(markdown.contains("pass `model` and `reasoning_effort` explicitly"));
+        assert!(markdown.contains("`worker` role list (first listed agent wins)"));
         assert!(markdown
             .contains("Never invent or pass an `agent_type` value absent from the current schema"));
         assert!(markdown.contains("do not add a user-facing caveat"));
@@ -1288,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_skill_markdown_uses_placeholder_for_empty_description() {
+    fn workflow_skill_markdown_falls_back_to_default_worker_when_roles_empty() {
         let markdown = workflow_skill_markdown(
             &[test_subagent(
                 "empty-worker",
@@ -1296,13 +1413,16 @@ mod tests {
                 "deepseek-v4-flash",
                 "high",
             )],
-            &["empty-worker".to_string()],
+            &RoleAgents::default(),
             "empty-worker",
         );
 
-        assert!(markdown.contains(
-            "- `empty-worker`: (no description provided) (model: deepseek-v4-flash, reasoning: high)"
-        ));
+        assert!(markdown.contains("**Default worker:** `empty-worker`"));
+        // 空角色映射不列出任何角色分组的 agent。
+        assert!(!markdown.contains("- **worker:**"));
+        assert!(!markdown.contains("- **explorer:**"));
+        assert!(!markdown.contains("- **default:**"));
+        assert!(markdown.contains("then to the default worker"));
     }
 
     #[test]
@@ -1363,6 +1483,7 @@ mod tests {
             dir,
             "worker-a",
             &["worker-a".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -1395,6 +1516,7 @@ mod tests {
             dir,
             "worker",
             &["worker".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -1419,6 +1541,7 @@ mod tests {
             temp.path(),
             "worker-a",
             &["worker-a".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -1427,6 +1550,7 @@ mod tests {
             temp.path(),
             "worker-b",
             &["worker-b".to_string()],
+            &RoleAgents::default(),
             WORKFLOW_MODE_SKILL,
             "high",
         )
@@ -1456,6 +1580,7 @@ mod tests {
                 version: 1,
                 worker_agent: "deepseek-flash".to_owned(),
                 worker_agents: Vec::new(),
+                role_agents: RoleAgents::default(),
                 mode: WORKFLOW_MODE_SKILL.to_string(),
                 skill_directory: WORKFLOW_SKILL_DIRECTORY.to_string(),
             })
@@ -1472,6 +1597,7 @@ mod tests {
                 version: 1,
                 worker_agent: "deepseek-flash".to_owned(),
                 worker_agents: vec!["deepseek-flash".to_owned(), "review-worker".to_owned()],
+                role_agents: RoleAgents::default(),
                 mode: WORKFLOW_MODE_SKILL.to_string(),
                 skill_directory: WORKFLOW_SKILL_DIRECTORY.to_string(),
             })
@@ -1492,7 +1618,7 @@ mod tests {
                 "deepseek-v4-flash",
                 "xhigh",
             )],
-            &["deepseek-flash".to_string()],
+            &RoleAgents::default(),
             "deepseek-flash",
         );
         let (name, description) = workflow_skill_metadata(&markdown);

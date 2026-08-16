@@ -23,6 +23,8 @@ export interface CodexSubagent {
   reasoningEffort: string;
   /** Provider 协议（responses / chat 等），由后端从 provider config 读出。 */
   wireApi: string;
+  /** 注册角色类型：worker | explorer | default。 */
+  agentType: string;
 }
 
 export interface CodexSubagentUpsertPayload {
@@ -37,6 +39,8 @@ export interface CodexSubagentUpsertPayload {
   reasoningEffort: string;
   /** 可选；旧 payload 未提供时后端默认 responses。 */
   wireApi?: string;
+  /** 注册角色类型：worker | explorer | default；省略时后端默认 worker。 */
+  agentType?: string;
 }
 
 export interface CodexSubagentModelsFetchPayload {
@@ -50,11 +54,19 @@ export interface CodexSubagentModelCandidate {
   displayName: string | null;
 }
 
+export interface CodexAgentWorkflowRoleAgents {
+  worker: string[];
+  explorer: string[];
+  default: string[];
+}
+
 export interface CodexAgentWorkflowStatus {
   installed: boolean;
   canUndo: boolean;
   workerAgent: string;
   workerAgents: string[];
+  /** 角色 → agent 映射（worker / explorer / default）；旧 manifest 由 workerAgents 推导。 */
+  roleAgents: CodexAgentWorkflowRoleAgents;
   workerModel: string;
   workerReasoningEffort: string;
   modelProvider: string | null;
@@ -83,6 +95,8 @@ export interface CodexAgentWorkflowStatus {
 export interface CodexAgentWorkflowInstallPayload {
   workerAgent: string;
   workerAgents: string[];
+  /** 角色 → agent 映射；不传时后端把 workerAgents 归入 worker 角色。 */
+  roleAgents?: CodexAgentWorkflowRoleAgents;
 }
 
 export const codexAgentWorkflowApi = {

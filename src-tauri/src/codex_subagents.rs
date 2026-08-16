@@ -11,6 +11,48 @@ pub const SUBAGENT_KEY_DIRNAME: &str = "codex-cube-agent-keys";
 pub const SUBAGENT_AGENT_DIRNAME: &str = "agents";
 pub const SUBAGENT_RUNTIME_PROVIDER_ID: &str = "custom";
 pub const INHERIT_SANDBOX_MODE: &str = "inherit";
+// 注册 subagent 的官方角色类型：worker（实现/执行）、explorer（只读探索）、default（通用）。
+// 类型驱动自动生成的 description / developer_instructions，并在 Workflow Skill 中决定
+// 派发路由与 fallback 的 agent_type。
+pub const AGENT_TYPE_WORKER: &str = "worker";
+pub const AGENT_TYPE_EXPLORER: &str = "explorer";
+pub const AGENT_TYPE_DEFAULT: &str = "default";
+pub const AGENT_TYPES: [&str; 3] = [AGENT_TYPE_WORKER, AGENT_TYPE_EXPLORER, AGENT_TYPE_DEFAULT];
+
+/// 解析 agent 类型：空/未知回退 worker（与历史行为一致）。
+pub fn resolve_agent_type(value: Option<&str>) -> String {
+    let value = value.unwrap_or("").trim();
+    if AGENT_TYPES.contains(&value) {
+        value.to_owned()
+    } else {
+        AGENT_TYPE_WORKER.to_owned()
+    }
+}
+
+/// 按类型生成 agent 的 description（未提供自定义描述时的自动预填）。
+pub fn default_agent_description(agent_type: &str, model: &str) -> String {
+    let label = match agent_type {
+        AGENT_TYPE_EXPLORER => "explorer",
+        AGENT_TYPE_DEFAULT => "general-purpose",
+        _ => "worker",
+    };
+    let model = model.trim();
+    if model.is_empty() {
+        label.to_owned()
+    } else {
+        format!("{model} {label}")
+    }
+}
+
+/// 按类型生成 agent 的 developer_instructions（写进 agent TOML）。
+pub fn default_agent_instructions(agent_type: &str) -> &'static str {
+    match agent_type {
+        AGENT_TYPE_EXPLORER => "Explore the delegated scope read-only: inspect files, trace behavior, verify assumptions, and report concrete findings, evidence, and recommended changes. Do not modify files unless the task explicitly asks for a write.",
+        AGENT_TYPE_DEFAULT => "Work on the delegated scope, edit the shared workspace directly, preserve unrelated changes, run focused verification, and report changed files, tests, and risks.",
+        _ => "Implement only the delegated scope, edit the shared workspace directly, preserve unrelated changes, run focused verification, and report changed files, tests, and risks.",
+    }
+}
+
 // sandbox 固定 inherit：UI 不可编辑，upsert 强制覆盖为 inherit，不信任前端/旧 payload 传入的值。
 // 读取旧 agent 时仍兼容其历史 sandbox_mode 字符串（仅展示，不再生效）。
 pub const SUBAGENT_SANDBOX_MODES: &[&str] = &[INHERIT_SANDBOX_MODE];
@@ -60,6 +102,9 @@ pub struct ManagedSubagent {
     #[serde(default)]
     pub original_key: Option<Vec<u8>>,
     pub created_at: String,
+    /// 注册角色类型：worker | explorer | default；旧记录为空串，读取时回退 worker。
+    #[serde(default)]
+    pub agent_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +123,8 @@ pub struct SubagentRecord {
     pub sandbox_mode: String,
     pub reasoning_effort: String,
     pub wire_api: String,
+    /// 注册角色类型（已解析，worker/explorer/default）。
+    pub agent_type: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +142,9 @@ pub struct SubagentUpsertPayload {
     /// 复用 Provider / 外部导入 / 编辑时携带的协议；旧 payload 未提供时后端默认 responses。
     #[serde(default)]
     pub wire_api: Option<String>,
+    /// 注册角色类型：worker | explorer | default；未提供时按旧行为默认 worker。
+    #[serde(default)]
+    pub agent_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -369,10 +419,14 @@ pub fn validate_url(url: &str) -> Result<(), AppError> {
 pub fn validate_payload(payload: &SubagentUpsertPayload) -> Result<(), AppError> {
     validate_subagent_name(&payload.name)?;
     validate_provider_id(&payload.model_provider_id)?;
-    if payload.description.trim().is_empty() {
-        return Err(AppError::InvalidInput(
-            "subagent description 不能为空".into(),
-        ));
+    // description 可选：为空时后端按 agent_type 自动生成（"<model> worker/explorer/general-purpose"）。
+    if let Some(agent_type) = payload.agent_type.as_deref() {
+        if !AGENT_TYPES.contains(&agent_type.trim()) {
+            return Err(AppError::InvalidInput(format!(
+                "agent_type {:?} 不支持（worker | explorer | default）",
+                agent_type
+            )));
+        }
     }
     if payload.model.trim().is_empty() {
         return Err(AppError::InvalidInput("model 不能为空".into()));
@@ -534,6 +588,7 @@ mod embedded_agent_tests {
             sandbox_mode: "read-only".to_owned(),
             reasoning_effort: "high".to_owned(),
             wire_api: None,
+            agent_type: None,
         }
     }
 
@@ -717,10 +772,16 @@ fn render_agent_toml_with_provider(
     command: &str,
     args: &[String],
 ) -> Result<String, AppError> {
+    let agent_type = resolve_agent_type(payload.agent_type.as_deref());
     let mut doc = DocumentMut::new();
     doc["name"] = value(payload.name.trim());
-    doc["description"] = value(payload.description.trim());
-    doc["developer_instructions"] = value("Implement only the delegated scope, edit the shared workspace directly, preserve unrelated changes, run focused verification, and report changed files, tests, and risks.");
+    let description = if payload.description.trim().is_empty() {
+        default_agent_description(&agent_type, &payload.model)
+    } else {
+        payload.description.trim().to_owned()
+    };
+    doc["description"] = value(description);
+    doc["developer_instructions"] = value(default_agent_instructions(&agent_type));
     doc["model"] = value(payload.model.trim());
     doc["model_provider"] = value(SUBAGENT_RUNTIME_PROVIDER_ID);
     doc["model_reasoning_effort"] = value(payload.reasoning_effort.trim());
@@ -846,6 +907,9 @@ fn list_subagents_in(
                 .and_then(Item::as_table_like)
                 .and_then(|provider| provider.get("auth"))
                 .is_some();
+        let agent_type = manifest_record
+            .map(|record| resolve_agent_type(Some(record.agent_type.as_str())))
+            .unwrap_or_else(|| AGENT_TYPE_WORKER.to_owned());
         records.push(SubagentRecord {
             managed: manifest_record.is_some(),
             available,
@@ -875,6 +939,7 @@ fn list_subagents_in(
                 .unwrap_or("medium")
                 .to_owned(),
             wire_api,
+            agent_type,
         });
     }
     records.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -924,6 +989,7 @@ fn upsert_subagent_in(
             .trim()
             .to_owned(),
     );
+    let agent_type = resolve_agent_type(payload.agent_type.as_deref());
     // 任何路径构造/文件读取前必须先校验名称，防止 "../outside" 之类非法 name
     // 触碰 manifest/key 目录之外的文件。随后用 manifest provider_id 规范化，
     // 再调用完整 validate_payload。
@@ -966,6 +1032,32 @@ fn upsert_subagent_in(
     let agent_path = agent_path_in(config_dir, &payload.name);
     let original_agent = read_optional_text(&agent_path)?;
     let old_record = if is_edit { existing_by_name } else { None };
+    // 编辑且未携带自定义描述：保留现有 TOML 描述；若描述仍是旧类型的自动生成文案
+    // 且类型已变更，则跟随新类型重新生成，避免类型切换后描述与角色不一致。
+    if is_edit && payload.description.trim().is_empty() {
+        let existing_description = match original_agent
+            .as_deref()
+            .and_then(|text| text.parse::<toml::Value>().ok())
+        {
+            Some(value) => value
+                .get("description")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            None => String::new(),
+        };
+        let old_type = old_record
+            .as_ref()
+            .map(|record| resolve_agent_type(Some(record.agent_type.as_str())))
+            .unwrap_or_else(|| AGENT_TYPE_WORKER.to_owned());
+        if agent_type != old_type
+            && existing_description == default_agent_description(&old_type, &payload.model)
+        {
+            payload.description = default_agent_description(&agent_type, &payload.model);
+        } else {
+            payload.description = existing_description;
+        }
+    }
     validate_payload(&payload)?;
     if manifest.agents.iter().any(|record| {
         record.provider_id == payload.model_provider_id.trim() && record.name != payload.name.trim()
@@ -1008,6 +1100,7 @@ fn upsert_subagent_in(
         original_agent_toml: original_agent.clone(),
         original_key: original_key.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
+        agent_type: agent_type.clone(),
     });
     if let Some(record) = read_manifest_record_mut(&mut manifest, &payload.name) {
         if !record.provider_managed && provider_managed {
@@ -1018,6 +1111,7 @@ fn upsert_subagent_in(
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
         record.provider_managed = provider_managed;
+        record.agent_type = agent_type.clone();
     } else {
         manifest.agents.push(original_record);
     }
@@ -1223,6 +1317,7 @@ mod tests {
             sandbox_mode: sandbox_mode.to_owned(),
             reasoning_effort: reasoning_effort.to_owned(),
             wire_api: None,
+            agent_type: None,
         }
     }
 
@@ -2479,6 +2574,7 @@ mod custom_provider_tests {
             sandbox_mode: INHERIT_SANDBOX_MODE.to_owned(),
             reasoning_effort: "high".to_owned(),
             wire_api: Some("responses".to_owned()),
+            agent_type: None,
         }
     }
 

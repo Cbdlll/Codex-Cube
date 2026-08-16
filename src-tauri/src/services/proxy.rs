@@ -1051,6 +1051,20 @@ impl ProxyService {
                     }
                     self.write_codex_live(&config)?;
                     log::info!("Codex Live 配置已恢复");
+                    // 恢复出的 Live 若路由到官方端点，auth.json 里残留的第三方
+                    // key 会被 Codex 发往 api.openai.com 得到 401。这里按官方
+                    // 切换同款策略清掉残留 key（key 在 DB Provider 中仍有备份）。
+                    if let Some(cfg) = config.get("config").and_then(serde_json::Value::as_str) {
+                        match crate::codex_config::clear_stale_codex_live_auth_if_official_route(
+                            cfg,
+                        ) {
+                            Ok(true) => log::info!(
+                                "恢复后清理了 auth.json 中残留的第三方 API key（官方路由）"
+                            ),
+                            Ok(false) => {}
+                            Err(e) => log::warn!("恢复后清理残留 auth.json 失败: {e}"),
+                        }
+                    }
                 }
                 // 恢复/清除聚合 Provider 写入的桌面端模型缓存（幂等）。
                 if let Err(e) = crate::codex_config::restore_or_clear_codex_models_cache(
@@ -1129,6 +1143,20 @@ impl ProxyService {
                 }
                 self.write_live_config_for_app(app_type, &config)?;
                 log::info!("{app_type_str} Live 配置已从备份恢复");
+                // 与 restore_live_config_for_app_inner 相同的残留 key 清理：
+                // 恢复出的 Live 若路由官方端点，auth.json 中残留的第三方 key
+                // 会被 Codex 发往 api.openai.com 得到 401。
+                if app_type == &AppType::Codex {
+                    if let Some(cfg) = config.get("config").and_then(serde_json::Value::as_str) {
+                        match crate::codex_config::clear_stale_codex_live_auth_if_official_route(cfg) {
+                            Ok(true) => log::info!(
+                                "{app_type_str} 恢复后清理了 auth.json 中残留的第三方 API key（官方路由）"
+                            ),
+                            Ok(false) => {}
+                            Err(e) => log::warn!("{app_type_str} 恢复后清理残留 auth.json 失败: {e}"),
+                        }
+                    }
+                }
                 return Ok(());
             }
         }
@@ -1319,6 +1347,18 @@ impl ProxyService {
         }
 
         self.write_codex_live(&config)?;
+
+        // 清理后配置可能回落官方端点（无 base_url），此时 auth.json 里残留的
+        // 第三方 key 会被 Codex 发往 api.openai.com 得到 401，同样清掉。
+        if let Some(cfg) = config.get("config").and_then(serde_json::Value::as_str) {
+            match crate::codex_config::clear_stale_codex_live_auth_if_official_route(cfg) {
+                Ok(true) => log::info!(
+                    "清理接管占位符后移除了 auth.json 中残留的第三方 API key（官方路由）"
+                ),
+                Ok(false) => {}
+                Err(e) => log::warn!("清理接管占位符后移除残留 auth.json 失败: {e}"),
+            }
+        }
         Ok(())
     }
 

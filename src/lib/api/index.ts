@@ -14,6 +14,7 @@ export { sessionsApi } from "./sessions";
 export { codexAgentWorkflowApi } from "./codexAgentWorkflow";
 export type {
   CodexAgentWorkflowInstallPayload,
+  CodexAgentWorkflowRoleAgents,
   CodexAgentWorkflowStatus,
   CodexSubagent,
   CodexSubagentModelCandidate,

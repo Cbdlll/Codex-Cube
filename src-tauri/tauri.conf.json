@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex-Cube",
+  "productName": "Codex Cube",
   "version": "1.0.0",
   "identifier": "com.codexcube.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Codex-Cube",
+        "title": "Codex Cube",
         "titleBarStyle": "Overlay",
         "width": 1000,
         "height": 650,

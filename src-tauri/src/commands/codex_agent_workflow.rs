@@ -16,6 +16,8 @@ pub struct CodexAgentWorkflowStatus {
     pub can_undo: bool,
     pub worker_agent: String,
     pub worker_agents: Vec<String>,
+    /// 角色 → agent 映射（worker / explorer / default）；旧 manifest 由 worker_agents 推导。
+    pub role_agents: codex_agent_workflow::RoleAgents,
     pub worker_model: String,
     pub worker_reasoning_effort: String,
     pub model_provider: Option<String>,
@@ -38,26 +40,56 @@ pub struct CodexAgentWorkflowStatus {
 pub struct CodexAgentWorkflowInstallPayload {
     pub worker_agent: String,
     pub worker_agents: Vec<String>,
+    /// 角色 → agent 映射；旧客户端不携带时由 worker_agents 推导为 worker 角色。
+    #[serde(default)]
+    pub role_agents: codex_agent_workflow::RoleAgents,
 }
 
 fn get_status(app_state: &AppState) -> Result<CodexAgentWorkflowStatus, AppError> {
     let config_dir = crate::codex_config::get_codex_config_dir();
     let manifest = codex_agent_workflow::load_manifest(&config_dir)?;
     let agents = codex_subagents::list_subagents()?;
-    let selected = manifest.as_ref().and_then(|manifest| {
-        agents
-            .iter()
-            .find(|agent| agent.name == manifest.worker_agent)
-    });
-    let worker_agents = manifest
+    // 旧 manifest（无 role_agents）：worker_agents 整体归入 worker 角色，
+    // 默认 worker 沿用原 manifest.worker_agent，避免迁移后默认 worker 漂移。
+    let has_role_agents = manifest
         .as_ref()
-        .map(|m| codex_agent_workflow::selected_agents(&config_dir))
-        .transpose()?
-        .unwrap_or_default();
-    let worker_agent = manifest
+        .is_some_and(|manifest| !manifest.role_agents.is_empty());
+    let role_agents = manifest
         .as_ref()
-        .map(|manifest| manifest.worker_agent.clone())
+        .map(|manifest| {
+            if manifest.role_agents.is_empty() {
+                let mut role = codex_agent_workflow::RoleAgents::default();
+                role.worker = manifest.worker_agents.clone();
+                role
+            } else {
+                manifest.role_agents.clone()
+            }
+        })
         .unwrap_or_default();
+    let worker_agents = if role_agents.is_empty() {
+        manifest
+            .as_ref()
+            .map(|_| codex_agent_workflow::selected_agents(&config_dir))
+            .transpose()?
+            .unwrap_or_default()
+    } else {
+        role_agents.union()
+    };
+    let worker_agent = if has_role_agents {
+        codex_agent_workflow::derive_worker_agent(&role_agents)
+    } else {
+        manifest
+            .as_ref()
+            .map(|manifest| {
+                if !manifest.worker_agent.trim().is_empty() {
+                    manifest.worker_agent.clone()
+                } else {
+                    codex_agent_workflow::derive_worker_agent(&role_agents)
+                }
+            })
+            .unwrap_or_default()
+    };
+    let selected = agents.iter().find(|agent| agent.name == worker_agent);
     let mode = manifest
         .as_ref()
         .map(|manifest| manifest.mode.clone())
@@ -83,7 +115,7 @@ fn get_status(app_state: &AppState) -> Result<CodexAgentWorkflowStatus, AppError
     {
         let expected = codex_agent_workflow::workflow_skill_markdown(
             &managed_agents,
-            &worker_agents,
+            &role_agents,
             &worker_agent,
         );
         Some(expected) != skill_content
@@ -139,6 +171,7 @@ fn get_status(app_state: &AppState) -> Result<CodexAgentWorkflowStatus, AppError
         skill_content,
         skill_stale,
         worker_agents,
+        role_agents,
     })
 }
 
@@ -156,14 +189,19 @@ pub fn install_codex_agent_workflow(
 ) -> Result<CodexAgentWorkflowStatus, String> {
     let config_dir = crate::codex_config::get_codex_config_dir();
     let agents = codex_subagents::list_subagents().map_err(|error| error.to_string())?;
-    let mut selected = payload.worker_agents.clone();
+    // 角色映射优先；旧客户端不携带 role_agents 时把 worker_agents 归入 worker 角色。
+    let mut role_agents = payload.role_agents.clone();
+    if role_agents.is_empty() {
+        role_agents.worker = payload.worker_agents.clone();
+    }
+    let mut selected = role_agents.union();
     if selected.is_empty() {
         selected.push(payload.worker_agent.trim().to_string());
     }
     selected.sort();
     selected.dedup();
     let worker_name = if payload.worker_agent.trim().is_empty() {
-        selected.first().cloned().unwrap_or_default()
+        codex_agent_workflow::derive_worker_agent(&role_agents)
     } else {
         payload.worker_agent.trim().to_string()
     };
@@ -190,7 +228,7 @@ pub fn install_codex_agent_workflow(
     if let Err(error) = install_workflow_skill(
         &app_state,
         &managed_agents,
-        &selected,
+        &role_agents,
         &worker.name,
         &config_dir,
     ) {
@@ -212,7 +250,7 @@ pub fn install_codex_agent_workflow(
 pub(crate) fn install_workflow_skill(
     app_state: &AppState,
     agents: &[codex_subagents::SubagentRecord],
-    selected: &[String],
+    role_agents: &codex_agent_workflow::RoleAgents,
     worker_agent: &str,
     config_dir: &Path,
 ) -> Result<(), AppError> {
@@ -238,7 +276,7 @@ pub(crate) fn install_workflow_skill(
     let result = (|| -> Result<(), AppError> {
         std::fs::create_dir_all(&agents_dir).map_err(|error| AppError::io(&agents_dir, error))?;
         let markdown =
-            codex_agent_workflow::workflow_skill_markdown(agents, selected, worker_agent);
+            codex_agent_workflow::workflow_skill_markdown(agents, role_agents, worker_agent);
         crate::config::write_text_file(&skill_dir.join("SKILL.md"), &markdown)?;
         crate::config::write_text_file(
             &agents_dir.join("openai.yaml"),
@@ -278,10 +316,12 @@ pub(crate) fn install_workflow_skill(
             &AppType::Codex,
         )
         .map_err(|error| AppError::Message(error.to_string()))?;
+        let selected = role_agents.union();
         codex_agent_workflow::install(
             config_dir,
             worker_agent,
-            selected,
+            &selected,
+            role_agents,
             codex_agent_workflow::WORKFLOW_MODE_SKILL,
             agents
                 .iter()
@@ -328,11 +368,25 @@ pub(crate) fn refresh_workflow_skill_if_installed(app_state: &AppState) -> Resul
     {
         return Ok(());
     }
+    let legacy = manifest.role_agents.is_empty();
+    let role_agents = if legacy {
+        let mut role = codex_agent_workflow::RoleAgents::default();
+        role.worker = codex_agent_workflow::selected_agents(&config_dir)?;
+        role
+    } else {
+        manifest.role_agents.clone()
+    };
+    // 旧 manifest 迁移时保持原默认 worker；新 manifest 由角色推导。
+    let worker_agent = if legacy && !manifest.worker_agent.trim().is_empty() {
+        manifest.worker_agent.clone()
+    } else {
+        codex_agent_workflow::derive_worker_agent(&role_agents)
+    };
     install_workflow_skill(
         app_state,
         &managed_agents,
-        &codex_agent_workflow::selected_agents(&config_dir)?,
-        &manifest.worker_agent,
+        &role_agents,
+        &worker_agent,
         &config_dir,
     )
 }
@@ -413,6 +467,7 @@ mod tests {
             sandbox_mode: crate::codex_subagents::INHERIT_SANDBOX_MODE.to_owned(),
             reasoning_effort: "xhigh".to_owned(),
             wire_api: Some("responses".to_owned()),
+            agent_type: None,
         }
     }
 
@@ -428,6 +483,21 @@ mod tests {
             .collect()
     }
 
+    fn worker_role(names: &[&str]) -> codex_agent_workflow::RoleAgents {
+        let mut role = codex_agent_workflow::RoleAgents::default();
+        role.worker = names.iter().map(|name| name.to_string()).collect();
+        role
+    }
+
+    fn register_subagent_with_reasoning(
+        name: &str,
+        reasoning: &str,
+    ) -> codex_subagents::SubagentRecord {
+        let mut payload = upsert_payload(name, "test");
+        payload.reasoning_effort = reasoning.to_owned();
+        codex_subagents::upsert_subagent(&payload).unwrap()
+    }
+
     #[test]
     #[serial_test::serial]
     fn workflow_skill_install_writes_ssot_and_reports_installed_status() {
@@ -438,7 +508,7 @@ mod tests {
         install_workflow_skill(
             &app_state,
             &[record],
-            &["deepseek-flash".to_string()],
+            &worker_role(&["deepseek-flash"]),
             "deepseek-flash",
             &config_dir,
         )
@@ -446,7 +516,10 @@ mod tests {
 
         let skill_path = codex_agent_workflow::workflow_skill_path().unwrap();
         let content = std::fs::read_to_string(&skill_path).unwrap();
-        assert!(content.contains("- `deepseek-flash`: 适合前端重构"));
+        assert!(content.contains("- **worker:**"));
+        assert!(
+            content.contains("  - `deepseek-flash` (model: deepseek-v4-flash, reasoning: xhigh)")
+        );
         assert!(content.contains("**Default worker:** `deepseek-flash`"));
         assert!(codex_agent_workflow::workflow_skill_dir()
             .unwrap()
@@ -469,7 +542,11 @@ mod tests {
             .contains(".codex/skills/cube-dispatch/SKILL.md"));
         assert!(status
             .skill_content
-            .is_some_and(|content| content.contains("适合前端重构")));
+            .is_some_and(|content| content.contains("reasoning: xhigh")));
+        assert_eq!(
+            status.role_agents.worker,
+            vec!["deepseek-flash".to_string()]
+        );
     }
 
     #[test]
@@ -512,7 +589,7 @@ mod tests {
         install_workflow_skill(
             &app_state,
             &[record],
-            &["deepseek-flash".to_string()],
+            &worker_role(&["deepseek-flash"]),
             "deepseek-flash",
             &config_dir,
         )
@@ -534,20 +611,20 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn refresh_workflow_skill_regenerates_after_subagent_description_change() {
+    fn refresh_workflow_skill_regenerates_after_subagent_reasoning_change() {
         let (_home, _home_guard, _location_guard, app_state) = setup();
-        register_subagent("deepseek-flash", "适合前端重构");
+        register_subagent_with_reasoning("deepseek-flash", "xhigh");
         let config_dir = crate::codex_config::get_codex_config_dir();
 
         install_workflow_skill(
             &app_state,
             &managed_agents(),
-            &["deepseek-flash".to_string()],
+            &worker_role(&["deepseek-flash"]),
             "deepseek-flash",
             &config_dir,
         )
         .unwrap();
-        register_subagent("deepseek-flash", "适合后端重构");
+        register_subagent_with_reasoning("deepseek-flash", "max");
 
         assert!(get_status(&app_state).unwrap().skill_stale);
 
@@ -557,7 +634,7 @@ mod tests {
         assert!(!status.skill_stale);
         assert!(status
             .skill_content
-            .is_some_and(|content| content.contains("适合后端重构")));
+            .is_some_and(|content| content.contains("reasoning: max")));
     }
 
     #[test]

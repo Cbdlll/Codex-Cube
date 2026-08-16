@@ -26,6 +26,7 @@ import { useTranslation } from "react-i18next";
 import {
   codexAgentWorkflowApi,
   providersApi,
+  type CodexAgentWorkflowRoleAgents,
   type CodexAgentWorkflowStatus,
   type CodexSubagent,
   type CodexSubagentModelCandidate,
@@ -67,9 +68,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ApiKeyInput from "@/components/providers/forms/ApiKeyInput";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { cn } from "@/lib/utils";
-import {
-  extractCodexModelName,
-} from "@/utils/providerConfigUtils";
+import { extractCodexModelName } from "@/utils/providerConfigUtils";
 import {
   getCodexMemberCredentials,
   getCodexMemberWireApi,
@@ -80,6 +79,10 @@ import type { Provider } from "@/types";
 
 // 固定官方 6 档（无 minimal），新建默认 high。
 const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+// 官方内置 subagent 角色：worker（实现/执行）、explorer（只读探索）、default（通用）。
+const AGENT_TYPES = ["worker", "explorer", "default"] as const;
+type AgentType = (typeof AGENT_TYPES)[number];
 
 interface AgentsPanelProps {
   onOpenChange?: (open: boolean) => void;
@@ -94,10 +97,12 @@ export function AgentsPanel(_props: AgentsPanelProps) {
   const [status, setStatus] = useState<CodexAgentWorkflowStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
 
-  const [workerName, setWorkerName] = useState("");
-  const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
-  const [workerTouched, setWorkerTouched] = useState(false);
-  const firstStatusHandled = useRef(false);
+  const [roleAgents, setRoleAgents] = useState<CodexAgentWorkflowRoleAgents>({
+    worker: [],
+    explorer: [],
+    default: [],
+  });
+  const roleTouched = useRef(false);
   const [installing, setInstalling] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
@@ -153,84 +158,94 @@ export function AgentsPanel(_props: AgentsPanelProps) {
     [subagents],
   );
 
-  // 已注册列表或已安装状态变化时保持选中的 worker 有效：
-  // 默认优先当前已安装的 worker（status.workerAgent），只有它不在列表时才回退到第一个 managed agent。
+  // 已注册列表或已安装状态变化时保持角色映射有效：过滤掉已不再注册的 agent；
+  // 用户主动修改后（roleTouched），refresh / install 不再覆盖。
   useEffect(() => {
+    if (roleTouched.current) return;
     if (managedSubagents.length === 0) {
-      setWorkerName("");
+      setRoleAgents({ worker: [], explorer: [], default: [] });
       return;
     }
-    setWorkerName((current) => {
-      if (managedSubagents.some((agent) => agent.name === current)) {
-        return current;
-      }
-      if (
-        status?.workerAgent &&
-        managedSubagents.some((agent) => agent.name === status.workerAgent)
-      ) {
-        return status.workerAgent;
-      }
-      return managedSubagents[0].name;
-    });
+    const valid = (names: string[] | undefined) =>
+      (names ?? []).filter((name) =>
+        managedSubagents.some((agent) => agent.name === name),
+      );
+    const hasStatusRoles = Boolean(
+      status?.roleAgents &&
+        (status.roleAgents.worker.length ||
+          status.roleAgents.explorer.length ||
+          status.roleAgents.default.length),
+    );
+    let next: CodexAgentWorkflowRoleAgents;
+    if (hasStatusRoles && status) {
+      next = {
+        worker: valid(status.roleAgents.worker),
+        explorer: valid(status.roleAgents.explorer),
+        default: valid(status.roleAgents.default),
+      };
+    } else if (status?.workerAgents?.length) {
+      // 旧 manifest：worker_agents 整体归入 worker 角色。
+      next = { worker: valid(status.workerAgents), explorer: [], default: [] };
+    } else if (status?.workerAgent) {
+      next = { worker: valid([status.workerAgent]), explorer: [], default: [] };
+    } else {
+      next = { worker: [], explorer: [], default: [] };
+    }
+    if (roleUnion(next).length === 0) {
+      next = { worker: [managedSubagents[0].name], explorer: [], default: [] };
+    }
+    setRoleAgents(next);
   }, [managedSubagents, status]);
 
-  // 默认选中集合：优先 status.workerAgents（兼容旧状态回退到 workerAgent），
-  // 过滤掉已不再注册的 agent；无可用选择时回退到第一个 managed agent。
-  // 用户主动选择后（workerTouched），refresh / install 不再覆盖。
-  useEffect(() => {
-    if (workerTouched) return;
-    if (managedSubagents.length === 0) {
-      setSelectedWorkers([]);
-      return;
-    }
-    const fromStatus = status?.workerAgents?.length
-      ? status.workerAgents
-      : status?.workerAgent
-        ? [status.workerAgent]
-        : [];
-    const valid = fromStatus.filter((name) =>
-      managedSubagents.some((agent) => agent.name === name),
-    );
-    setSelectedWorkers(valid.length ? valid : [managedSubagents[0].name]);
-  }, [managedSubagents, status, workerTouched]);
-
-  useEffect(() => {
-    if (firstStatusHandled.current || !status) return;
-    firstStatusHandled.current = true;
-    if (workerTouched) return;
-    setWorkerName((current) => {
-      if (
-        status.workerAgent &&
-        managedSubagents.some((agent) => agent.name === status.workerAgent) &&
-        current !== status.workerAgent
-      ) {
-        return status.workerAgent;
-      }
-      return current;
-    });
-  }, [status, managedSubagents, workerTouched]);
-
   const selectedWorker = useMemo(
-    () => subagents.find((agent) => agent.name === workerName) ?? null,
-    [subagents, workerName],
+    () =>
+      subagents.find((agent) => agent.name === deriveWorkerName(roleAgents)) ??
+      null,
+    [subagents, roleAgents],
   );
 
   const workflowUsesSubagent = useCallback(
-    (name: string) =>
-      Boolean(
-        status?.workerAgents?.includes(name) || status?.workerAgent === name,
-      ),
-    [status],
+    (name: string) => roleUnion(roleAgents).includes(name),
+    [roleAgents],
   );
+
+  const toggleRole = async (
+    role: keyof CodexAgentWorkflowRoleAgents,
+    name: string,
+    checked: boolean,
+  ) => {
+    roleTouched.current = true;
+    const next: CodexAgentWorkflowRoleAgents = {
+      ...roleAgents,
+      [role]: checked
+        ? [...roleAgents[role], name]
+        : roleAgents[role].filter((n) => n !== name),
+    };
+    setRoleAgents(next);
+    // 已安装时即时按新映射重新生成 Skill；所有角色都清空时不重装。
+    if (status?.installed && roleUnion(next).length > 0) {
+      try {
+        setStatus(
+          await codexAgentWorkflowApi.installWorkflow({
+            workerAgent: deriveWorkerName(next),
+            workerAgents: roleUnion(next),
+            roleAgents: next,
+          }),
+        );
+      } catch (error) {
+        console.error("[AgentsPanel] Failed to reinstall workflow", error);
+      }
+    }
+  };
 
   const installWorkflow = async () => {
     if (!selectedWorker) return;
     setInstalling(true);
     try {
-      const selected = selectedWorkers.length ? selectedWorkers : [selectedWorker.name];
       const next = await codexAgentWorkflowApi.installWorkflow({
         workerAgent: selectedWorker.name,
-        workerAgents: selected,
+        workerAgents: roleUnion(roleAgents),
+        roleAgents,
       });
       setStatus(next);
       toast.success(
@@ -334,7 +349,7 @@ export function AgentsPanel(_props: AgentsPanelProps) {
             dot: "bg-amber-500",
             text: t("agents.notInstalledStatus", {
               defaultValue:
-                "Not installed — pick a worker and install the Workflow Skill below.",
+                "Not installed — assign worker/explorer/default roles and install the Workflow Skill below.",
             }),
           }
         : {
@@ -346,13 +361,13 @@ export function AgentsPanel(_props: AgentsPanelProps) {
           };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-6">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-6">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-3">
         <Card className="rounded-xl border-border shadow-sm">
           <CardHeader className="px-4 py-3">
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 items-start gap-3">
-                <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-cyan-400 text-white">
+                <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
                   <Workflow className="h-4 w-4" />
                 </span>
                 <div className="min-w-0">
@@ -422,479 +437,480 @@ export function AgentsPanel(_props: AgentsPanelProps) {
           </CardHeader>
         </Card>
 
-        <Card className="rounded-xl border-border shadow-sm">
-          <CardHeader className="px-4 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-cyan-400 text-white">
-                  <Users className="h-3.5 w-3.5" />
-                </span>
-                <div className="min-w-0">
-                  <h2 className="text-sm font-semibold">
-                    {t("agents.registeredAgents", {
-                      defaultValue: "Registered subagents",
-                    })}
-                  </h2>
-                  <p className="text-xs text-muted-foreground">
-                    {t("agents.registeredAgentsDesc", {
-                      defaultValue:
-                        "Register multiple subagents; the workflow uses one as its default worker and records every subagent in the Workflow Skill so Codex can pick the right one.",
-                    })}
-                  </p>
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                {!subagentsLoading && !subagentsLoadFailed && (
-                  <Badge variant="outline">
-                    {t("agents.subagentCount", {
-                      defaultValue: "{{count}} subagents",
-                      count: subagents.length,
-                    })}
-                  </Badge>
-                )}
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    setEditing(null);
-                    setFormOpen(true);
-                  }}
-                >
-                  <Plus className="h-4 w-4" />
-                  {t("agents.addSubagent", { defaultValue: "Add subagent" })}
-                </Button>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-2 px-4 pb-4 pt-0">
-            <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-800 dark:bg-amber-900/20">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-              <div className="min-w-0 text-xs leading-snug text-amber-700 dark:text-amber-300">
-                <p className="font-semibold">
-                  {t("agents.subagentRoutingRequiredTitle", {
-                    defaultValue:
-                      "Local routing required for custom subagents",
-                  })}
-                </p>
-                <p className="mt-0.5">
-                  {t("agents.subagentRoutingRequiredBody", {
-                    defaultValue:
-                      "Multi-agent v2 encrypts dispatched tasks. Without local routing enabled, Codex cannot deliver plaintext tasks to your custom subagents — delegation fails with empty or unreadable messages. Enable local routing (Proxy page → Local proxy takeover) before registering or using custom subagents.",
-                  })}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-start gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 dark:border-sky-800 dark:bg-sky-900/20">
-              <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-600 dark:text-sky-400" />
-              <div className="min-w-0 text-xs leading-snug text-sky-700 dark:text-sky-300">
-                <p className="font-semibold">
-                  {t("agents.subagentResponsesOnlyTitle", {
-                    defaultValue: "Responses protocol only",
-                  })}
-                </p>
-                <p className="mt-0.5">
-                  {t("agents.subagentResponsesOnlyBody", {
-                    defaultValue:
-                      "Custom subagents only support the Responses protocol. Chat Completions / Anthropic are not supported because Codex collaboration subagent task delivery relies on Responses plaintext handling.",
-                  })}
-                </p>
-              </div>
-            </div>
-            {subagentsLoading ? (
-              <div className="flex items-center gap-2 rounded-lg bg-muted/30 px-4 py-4 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                {t("agents.loading", { defaultValue: "Loading status..." })}
-              </div>
-            ) : subagentsLoadFailed ? (
-              <div className="flex flex-col items-start gap-2 rounded-lg bg-muted/30 px-4 py-4">
-                <p className="text-sm text-muted-foreground">
-                  {t("agents.subagentsLoadFailed", {
-                    defaultValue: "Failed to load registered subagents",
-                  })}
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void loadSubagents()}
-                >
-                  {t("agents.retry", { defaultValue: "Retry" })}
-                </Button>
-              </div>
-            ) : subagents.length === 0 ? (
-              <div className="rounded-lg bg-muted/30 px-4 py-4">
-                <p className="text-sm font-medium">
-                  {t("agents.subagentsEmpty", {
-                    defaultValue: "No subagents registered yet",
-                  })}
-                </p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {t("agents.subagentsEmptyHint", {
-                    defaultValue:
-                      "Register one or more subagents; the workflow uses one as its default worker and records every subagent in the Workflow Skill.",
-                  })}
-                </p>
-              </div>
-            ) : (
-              <ul className="flex flex-col gap-1.5">
-                {subagents.map((agent) => (
-                  <li
-                    key={agent.name}
-                    className="flex items-start gap-2 rounded-lg border border-border bg-background px-3 py-2"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="min-w-0 break-words text-sm font-semibold">
-                          {agent.name}
-                        </span>
-                        <Badge
-                          variant="secondary"
-                          className="max-w-48 truncate"
-                        >
-                          {agent.model}
-                        </Badge>
-                        {!agent.managed && (
-                          <Badge variant="outline">
-                            {t("agents.unmanagedBadge", {
-                              defaultValue: "Needs adoption",
-                            })}
-                          </Badge>
-                        )}
-                        {agent.managed && agent.available === false && (
-                          <Badge variant="destructive">
-                            {t("agents.unavailableBadge", {
-                              defaultValue: "Provider missing",
-                            })}
-                          </Badge>
-                        )}
-                        <Badge variant="outline">
-                          {sandboxLabel(agent.sandboxMode, t)}
-                        </Badge>
-                        <Badge variant="outline">{agent.reasoningEffort}</Badge>
-                      </div>
-                      {agent.description && (
-                        <p
-                          className="mt-0.5 truncate text-xs text-muted-foreground"
-                          title={agent.description}
-                        >
-                          {agent.description}
-                        </p>
-                      )}
-                      <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                        <FileText className="h-3 w-3 shrink-0" />
-                        <span
-                          className="min-w-0 truncate font-mono"
-                          title={agent.agentPath}
-                        >
-                          {agent.agentPath}
-                        </span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                        <span className="max-w-40 truncate">
-                          {agent.modelProviderId}
-                        </span>
-                        <span
-                          className="max-w-56 truncate"
-                          title={agent.modelBaseUrl}
-                        >
-                          {agent.modelBaseUrl}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <KeyRound className="h-3 w-3" />
-                          {agent.apiKey != null
-                            ? t("agents.keyConfigured", {
-                                defaultValue: "Configured",
-                              })
-                            : t("common.notSet", {
-                                defaultValue: "Not set",
-                              })}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`Edit ${agent.name}`}
-                        onClick={() => {
-                          setEditing(agent);
-                          setFormOpen(true);
-                        }}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        <span className="hidden sm:inline">
-                          {t("common.edit", { defaultValue: "Edit" })}
-                        </span>
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`Delete ${agent.name}`}
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => {
-                          if (workflowUsesSubagent(agent.name)) {
-                            toast.warning(
-                              t("agents.subagentDeleteBlockedByWorkflow", {
-                                defaultValue:
-                                  "This subagent is selected in the Workflow Skill. Deselect it before deleting.",
-                              }),
-                            );
-                            return;
-                          }
-                          setConfirmDelete(agent);
-                        }}
-                        disabled={!agent.managed}
-                        title={
-                          agent.managed
-                            ? undefined
-                            : t("agents.unmanagedDeleteHint", {
-                                defaultValue:
-                                  "Edit and save this existing agent to adopt it before removal.",
-                              })
-                        }
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        <span className="hidden sm:inline">
-                          {t("common.delete", { defaultValue: "Delete" })}
-                        </span>
-                      </Button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-xl border-border shadow-sm">
-          <CardHeader className="px-4 py-3">
-            <div className="flex items-center gap-2">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-cyan-400 text-white">
-                <FileText className="h-3.5 w-3.5" />
-              </span>
-              <div className="min-w-0">
-                <h2 className="text-sm font-semibold">
-                  {t("agents.instructionsStage", {
-                    defaultValue: "Workflow Skill",
-                  })}
-                </h2>
-                <p className="text-xs text-muted-foreground">
-                  {t("agents.instructionsStageDesc", {
-                    defaultValue:
-                      "Generates and installs the Workflow Skill at {{path}} so Codex can delegate bounded subtasks to your registered subagents.",
-                    path:
-                      status?.skillPath ??
-                      "~/.codex/skills/cube-dispatch/SKILL.md",
-                  })}
-                </p>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3 px-4 pb-4 pt-0">
-            <div className="grid gap-3 lg:grid-cols-2">
-              <Field
-                label={t("agents.workflowWorkers", { defaultValue: "Workflow subagents" })}
-                hint={t("agents.workflowWorkerHint", { defaultValue: "Select one or more subagents; choose one as the default worker." })}
-              >
-                <div className="grid gap-1 rounded-md border p-2 sm:grid-cols-2">
-                  {managedSubagents.map((agent) => (
-                    <label key={agent.name} className="flex items-center gap-2 text-sm">
-                      <input type="checkbox" checked={selectedWorkers.includes(agent.name)} onChange={async (e) => {
-                        const next = e.target.checked ? [...selectedWorkers, agent.name] : selectedWorkers.filter((n) => n !== agent.name);
-                        if (!next.length) return;
-                        setWorkerTouched(true); setSelectedWorkers(next);
-                        if (!next.includes(workerName)) setWorkerName(next[0]);
-                        if (status?.installed) {
-                          try { setStatus(await codexAgentWorkflowApi.installWorkflow({ workerAgent: next.includes(workerName) ? workerName : next[0], workerAgents: next })); } catch (error) { console.error(error); }
-                        }
-                      }} />
-                      <span>{agent.name}</span>
-                    </label>
-                  ))}
-                </div>
-                <Select value={workerName} onValueChange={(value) => { setWorkerTouched(true); setWorkerName(value); }} disabled={!selectedWorkers.length}>
-                  <SelectTrigger
-                    className="mt-2 h-8 w-full min-w-0"
-                    aria-label={t("agents.workflowDefaultWorker", {
-                      defaultValue: "Select default worker",
-                    })}
-                  >
-                    <span
-                      className="min-w-0 flex-1 truncate text-left"
-                      title={workerName || undefined}
-                    >
-                      <SelectValue
-                        placeholder={t("agents.workflowSelectPlaceholder", {
-                          defaultValue: "Select default worker…",
-                        })}
-                      />
+        <Tabs defaultValue="subagents">
+          <TabsList className="grid w-full grid-cols-2 rounded-lg bg-muted p-1">
+            <TabsTrigger value="subagents" className="min-w-0 gap-2">
+              <Users className="h-4 w-4" />
+              {t("agents.tabSubagents", {
+                defaultValue: "Subagent Registration",
+              })}
+            </TabsTrigger>
+            <TabsTrigger value="workflow" className="min-w-0 gap-2">
+              <FileText className="h-4 w-4" />
+              {t("agents.tabWorkflow", { defaultValue: "Workflow Skill" })}
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="subagents" className="mt-3">
+            <Card className="rounded-xl border-border shadow-sm">
+              <CardHeader className="px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                      <Users className="h-3.5 w-3.5" />
                     </span>
-                  </SelectTrigger>
-                  <SelectContent>{managedSubagents.filter((a) => selectedWorkers.includes(a.name)).map((a) => <SelectItem key={a.name} value={a.name}>{a.name}</SelectItem>)}</SelectContent>
-                </Select>
-              </Field>
-              <Field
-                label={t("agents.status", { defaultValue: "Status" })}
-                hint={
-                  status?.installed
-                    ? t("agents.installedStatus", {
-                        defaultValue:
-                          "Installed — the Workflow Skill is installed into Codex skills. Invoke it explicitly with @Cube Dispatch in any Codex conversation.",
-                      })
-                    : t("agents.notInstalledStatus", {
-                        defaultValue:
-                          "Not installed — pick a worker and install the Workflow Skill below.",
-                      })
-                }
-              >
-                <div className="flex h-8 items-center gap-2">
-                  <Badge variant="outline">
-                    {status?.installed
-                      ? t("agents.installedBadge", {
-                          defaultValue: "Installed",
-                        })
-                      : t("agents.notInstalledBadge", {
-                          defaultValue: "Not installed",
-                        })}
-                  </Badge>
-                  {status?.skillStale && (
-                    <Badge variant="secondary">
-                      {t("agents.instructionsMismatch", {
-                        defaultValue: "Content changed — update recommended",
-                      })}
-                    </Badge>
-                  )}
-                  {statusLoading && (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  )}
-                </div>
-              </Field>
-            </div>
-
-            {status?.installed && (
-              <div className="rounded-lg bg-muted/30">
-                <div className="px-3 py-1 text-xs font-medium text-muted-foreground">
-                  {t("agents.currentWorkerSummary", {
-                    defaultValue: "Current worker",
-                  })}
-                </div>
-                <div className="grid gap-x-4 sm:grid-cols-2">
-                  <ConfigSummary
-                    label={t("agents.worker", { defaultValue: "Worker" })}
-                    value={status.workerAgent || "—"}
-                  />
-                  <ConfigSummary
-                    label={t("agents.workerModel", {
-                      defaultValue: "Worker model",
-                    })}
-                    value={status.workerModel || "—"}
-                  />
-                  <ConfigSummary
-                    label={t("agents.reasoning", {
-                      defaultValue: "Worker reasoning effort",
-                    })}
-                    value={status.workerReasoningEffort || "—"}
-                  />
-                  <ConfigSummary
-                    label={t("agents.sandbox", {
-                      defaultValue: "Sandbox mode",
-                    })}
-                    value={status.sandboxMode || "—"}
-                  />
-                </div>
-              </div>
-            )}
-
-            {status?.installed &&
-              status.skillContent && (
-                <div className="rounded-lg bg-muted/30">
-                  <div className="flex items-start justify-between gap-2 px-3 py-2">
                     <div className="min-w-0">
-                      <div className="text-xs font-medium text-muted-foreground">
-                        {t("agents.injectedRules", {
-                          defaultValue: "Workflow Skill content (SKILL.md)",
+                      <h2 className="text-sm font-semibold">
+                        {t("agents.registeredAgents", {
+                          defaultValue: "Registered subagents",
                         })}
-                      </div>
+                      </h2>
+                      <p className="text-xs text-muted-foreground">
+                        {t("agents.registeredAgentsDesc", {
+                          defaultValue:
+                            "Register subagents with a worker/explorer/default role; the workflow dispatches to the matching role and records every subagent in the Workflow Skill.",
+                        })}
+                      </p>
                     </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {!subagentsLoading && !subagentsLoadFailed && (
+                      <Badge variant="outline">
+                        {t("agents.subagentCount", {
+                          defaultValue: "{{count}} subagents",
+                          count: subagents.length,
+                        })}
+                      </Badge>
+                    )}
                     <Button
-                      type="button"
-                      variant="ghost"
                       size="sm"
-                      className="h-6 shrink-0 px-2 text-xs"
-                      onClick={() => setPreviewOpen((open) => !open)}
+                      onClick={() => {
+                        setEditing(null);
+                        setFormOpen(true);
+                      }}
                     >
-                      {previewOpen
-                        ? t("agents.previewHide", {
-                            defaultValue: "Hide preview",
-                          })
-                        : t("agents.previewShow", {
-                            defaultValue: "Preview",
-                          })}
+                      <Plus className="h-4 w-4" />
+                      {t("agents.addSubagent", {
+                        defaultValue: "Add subagent",
+                      })}
                     </Button>
                   </div>
-                  {previewOpen && (
-                    <pre className="mx-3 mb-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-2 text-xs leading-relaxed text-muted-foreground">
-                      {status.skillContent}
-                    </pre>
-                  )}
                 </div>
-              )}
-
-            <div
-              className="truncate rounded-lg bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground"
-              title={status?.skillPath}
-            >
-              {status?.skillPath ?? "~/.codex/skills/cube-dispatch/SKILL.md"}
-            </div>
-
-            {managedSubagents.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                {t("agents.noRegisteredWorkers", {
-                  defaultValue:
-                    "No registered subagents — register one above first.",
-                })}
-              </p>
-            )}
-
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                onClick={() => void installWorkflow()}
-                disabled={busy || !selectedWorker || !selectedWorkers.length}
-              >
-                {installing && <Loader2 className="h-4 w-4 animate-spin" />}
-                {installing
-                  ? t("agents.installing", {
-                      defaultValue: "Installing...",
-                    })
-                  : status?.installed
-                    ? t("agents.update", {
-                        defaultValue: "Update workflow skill",
-                      })
-                    : t("agents.workflowInstall", {
-                        defaultValue: "Install workflow skill",
+              </CardHeader>
+              <CardContent className="flex flex-col gap-2 px-4 pb-4 pt-0">
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-700/60 dark:bg-amber-900/20">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <div className="min-w-0 text-xs leading-snug text-amber-700 dark:text-amber-300">
+                    <p className="font-semibold">
+                      {t("agents.subagentRoutingRequiredTitle", {
+                        defaultValue:
+                          "Local routing required for custom subagents",
                       })}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => setConfirmCancel(true)}
-                disabled={busy || !status?.canUndo}
-              >
-                {cancelling ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    </p>
+                    <p className="mt-0.5">
+                      {t("agents.subagentRoutingRequiredBody", {
+                        defaultValue:
+                          "Multi-agent v2 encrypts dispatched tasks. Without local routing enabled, Codex cannot deliver plaintext tasks to your custom subagents — delegation fails with empty or unreadable messages. Enable local routing (Proxy page → Local proxy takeover) before registering or using custom subagents.",
+                      })}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                  <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 text-xs leading-snug text-muted-foreground">
+                    <p className="font-semibold">
+                      {t("agents.subagentResponsesOnlyTitle", {
+                        defaultValue: "Responses protocol only",
+                      })}
+                    </p>
+                    <p className="mt-0.5">
+                      {t("agents.subagentResponsesOnlyBody", {
+                        defaultValue:
+                          "Custom subagents only support the Responses protocol. Chat Completions / Anthropic are not supported because Codex collaboration subagent task delivery relies on Responses plaintext handling.",
+                      })}
+                    </p>
+                  </div>
+                </div>
+                {subagentsLoading ? (
+                  <div className="flex items-center gap-2 rounded-lg bg-muted/30 px-4 py-4 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {t("agents.loading", { defaultValue: "Loading status..." })}
+                  </div>
+                ) : subagentsLoadFailed ? (
+                  <div className="flex flex-col items-start gap-2 rounded-lg bg-muted/30 px-4 py-4">
+                    <p className="text-sm text-muted-foreground">
+                      {t("agents.subagentsLoadFailed", {
+                        defaultValue: "Failed to load registered subagents",
+                      })}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void loadSubagents()}
+                    >
+                      {t("agents.retry", { defaultValue: "Retry" })}
+                    </Button>
+                  </div>
+                ) : subagents.length === 0 ? (
+                  <div className="rounded-lg bg-muted/30 px-4 py-4">
+                    <p className="text-sm font-medium">
+                      {t("agents.subagentsEmpty", {
+                        defaultValue: "No subagents registered yet",
+                      })}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {t("agents.subagentsEmptyHint", {
+                        defaultValue:
+                          "Register one or more subagents with a worker/explorer/default role, then assign the roles in the Workflow Skill below.",
+                      })}
+                    </p>
+                  </div>
                 ) : (
-                  <Undo2 className="h-3.5 w-3.5" />
+                  <ul className="flex flex-col gap-1.5">
+                    {subagents.map((agent) => (
+                      <li
+                        key={agent.name}
+                        className="flex items-start gap-2 rounded-lg border border-border bg-background px-3 py-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="min-w-0 break-words text-sm font-semibold">
+                              {agent.name}
+                            </span>
+                            <Badge
+                              variant="secondary"
+                              className="max-w-48 truncate"
+                            >
+                              {agent.model}
+                            </Badge>
+                            <Badge variant="outline">
+                              {agentTypeLabel(agent.agentType, t)}
+                            </Badge>
+                            {!agent.managed && (
+                              <Badge variant="outline">
+                                {t("agents.unmanagedBadge", {
+                                  defaultValue: "Needs adoption",
+                                })}
+                              </Badge>
+                            )}
+                            {agent.managed && agent.available === false && (
+                              <Badge variant="destructive">
+                                {t("agents.unavailableBadge", {
+                                  defaultValue: "Provider missing",
+                                })}
+                              </Badge>
+                            )}
+                            <Badge variant="outline">
+                              {sandboxLabel(agent.sandboxMode, t)}
+                            </Badge>
+                            <Badge variant="outline">
+                              {agent.reasoningEffort}
+                            </Badge>
+                          </div>
+                          {agent.description && (
+                            <p
+                              className="mt-0.5 truncate text-xs text-muted-foreground"
+                              title={agent.description}
+                            >
+                              {agent.description}
+                            </p>
+                          )}
+                          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                            <FileText className="h-3 w-3 shrink-0" />
+                            <span
+                              className="min-w-0 truncate font-mono"
+                              title={agent.agentPath}
+                            >
+                              {agent.agentPath}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                            <span className="max-w-40 truncate">
+                              {agent.modelProviderId}
+                            </span>
+                            <span
+                              className="max-w-56 truncate"
+                              title={agent.modelBaseUrl}
+                            >
+                              {agent.modelBaseUrl}
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <KeyRound className="h-3 w-3" />
+                              {agent.apiKey != null
+                                ? t("agents.keyConfigured", {
+                                    defaultValue: "Configured",
+                                  })
+                                : t("common.notSet", {
+                                    defaultValue: "Not set",
+                                  })}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            aria-label={`Edit ${agent.name}`}
+                            onClick={() => {
+                              setEditing(agent);
+                              setFormOpen(true);
+                            }}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            <span className="hidden sm:inline">
+                              {t("common.edit", { defaultValue: "Edit" })}
+                            </span>
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            aria-label={`Delete ${agent.name}`}
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => {
+                              if (workflowUsesSubagent(agent.name)) {
+                                toast.warning(
+                                  t("agents.subagentDeleteBlockedByWorkflow", {
+                                    defaultValue:
+                                      "This subagent is selected in the Workflow Skill. Deselect it before deleting.",
+                                  }),
+                                );
+                                return;
+                              }
+                              setConfirmDelete(agent);
+                            }}
+                            disabled={!agent.managed}
+                            title={
+                              agent.managed
+                                ? undefined
+                                : t("agents.unmanagedDeleteHint", {
+                                    defaultValue:
+                                      "Edit and save this existing agent to adopt it before removal.",
+                                  })
+                            }
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span className="hidden sm:inline">
+                              {t("common.delete", { defaultValue: "Delete" })}
+                            </span>
+                          </Button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 )}
-                {cancelling
-                  ? t("agents.cancellingInstructions", {
-                      defaultValue: "Uninstalling…",
-                    })
-                  : t("agents.cancelInstructions", {
-                      defaultValue: "Uninstall Skill",
-                    })}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
 
+          <TabsContent value="workflow" className="mt-3">
+            <Card className="rounded-xl border-border shadow-sm">
+              <CardHeader className="px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                    <FileText className="h-3.5 w-3.5" />
+                  </span>
+                  <div className="min-w-0">
+                    <h2 className="text-sm font-semibold">
+                      {t("agents.instructionsStage", {
+                        defaultValue: "Workflow Skill",
+                      })}
+                    </h2>
+                    <p className="text-xs text-muted-foreground">
+                      {t("agents.instructionsStageDesc", {
+                        defaultValue:
+                          "Generates and installs the Workflow Skill at {{path}} so Codex can delegate bounded subtasks to your registered subagents.",
+                        path:
+                          status?.skillPath ??
+                          "~/.codex/skills/cube-dispatch/SKILL.md",
+                      })}
+                    </p>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3 px-4 pb-4 pt-0">
+                <div className="grid gap-3 lg:grid-cols-3">
+                  {(
+                    [
+                      ["worker", "agents.workflowRoleWorker", "Worker role"],
+                      [
+                        "explorer",
+                        "agents.workflowRoleExplorer",
+                        "Explorer role",
+                      ],
+                      ["default", "agents.workflowRoleDefault", "Default role"],
+                    ] as const
+                  ).map(([role, labelKey, labelDefault]) => (
+                    <Field
+                      key={role}
+                      label={t(labelKey, { defaultValue: labelDefault })}
+                      hint={t("agents.workflowRoleHint", {
+                        defaultValue:
+                          "Pick which registered subagents serve this role. One subagent may serve multiple roles; the first listed wins.",
+                      })}
+                    >
+                      <div className="grid gap-1 rounded-md border p-2 sm:grid-cols-2">
+                        {managedSubagents.map((agent) => (
+                          <label
+                            key={agent.name}
+                            className="flex items-center gap-2 text-sm"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={roleAgents[role].includes(agent.name)}
+                              onChange={(event) =>
+                                void toggleRole(
+                                  role,
+                                  agent.name,
+                                  event.target.checked,
+                                )
+                              }
+                            />
+                            <span>{agent.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                      {role === "default" && (
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {t("agents.workflowDefaultWorkerNote", {
+                            defaultValue: "Default worker: {{name}}",
+                            name: selectedWorker?.name ?? "—",
+                          })}
+                        </p>
+                      )}
+                    </Field>
+                  ))}
+                </div>
+
+                {status?.installed && (
+                  <div className="rounded-lg bg-muted/30">
+                    <div className="px-3 py-1 text-xs font-medium text-muted-foreground">
+                      {t("agents.currentWorkerSummary", {
+                        defaultValue: "Current worker",
+                      })}
+                    </div>
+                    <div className="grid gap-x-4 sm:grid-cols-2">
+                      <ConfigSummary
+                        label={t("agents.worker", { defaultValue: "Worker" })}
+                        value={status.workerAgent || "—"}
+                      />
+                      <ConfigSummary
+                        label={t("agents.workerModel", {
+                          defaultValue: "Worker model",
+                        })}
+                        value={status.workerModel || "—"}
+                      />
+                      <ConfigSummary
+                        label={t("agents.reasoning", {
+                          defaultValue: "Worker reasoning effort",
+                        })}
+                        value={status.workerReasoningEffort || "—"}
+                      />
+                      <ConfigSummary
+                        label={t("agents.sandbox", {
+                          defaultValue: "Sandbox mode",
+                        })}
+                        value={status.sandboxMode || "—"}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {status?.installed && status.skillContent && (
+                  <div className="rounded-lg bg-muted/30">
+                    <div className="flex items-start justify-between gap-2 px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-muted-foreground">
+                          {t("agents.injectedRules", {
+                            defaultValue: "Workflow Skill content (SKILL.md)",
+                          })}
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 shrink-0 px-2 text-xs"
+                        onClick={() => setPreviewOpen((open) => !open)}
+                      >
+                        {previewOpen
+                          ? t("agents.previewHide", {
+                              defaultValue: "Hide preview",
+                            })
+                          : t("agents.previewShow", {
+                              defaultValue: "Preview",
+                            })}
+                      </Button>
+                    </div>
+                    {previewOpen && (
+                      <pre className="mx-3 mb-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-2 text-xs leading-relaxed text-muted-foreground">
+                        {status.skillContent}
+                      </pre>
+                    )}
+                  </div>
+                )}
+
+                <div
+                  className="truncate rounded-lg bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground"
+                  title={status?.skillPath}
+                >
+                  {status?.skillPath ??
+                    "~/.codex/skills/cube-dispatch/SKILL.md"}
+                </div>
+
+                {managedSubagents.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("agents.noRegisteredWorkers", {
+                      defaultValue:
+                        "No registered subagents — register one above first.",
+                    })}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    onClick={() => void installWorkflow()}
+                    disabled={
+                      busy ||
+                      !selectedWorker ||
+                      roleUnion(roleAgents).length === 0
+                    }
+                  >
+                    {installing && <Loader2 className="h-4 w-4 animate-spin" />}
+                    {installing
+                      ? t("agents.installing", {
+                          defaultValue: "Installing...",
+                        })
+                      : status?.installed
+                        ? t("agents.update", {
+                            defaultValue: "Update workflow skill",
+                          })
+                        : t("agents.workflowInstall", {
+                            defaultValue: "Install workflow skill",
+                          })}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setConfirmCancel(true)}
+                    disabled={busy || !status?.canUndo}
+                  >
+                    {cancelling ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Undo2 className="h-3.5 w-3.5" />
+                    )}
+                    {cancelling
+                      ? t("agents.cancellingInstructions", {
+                          defaultValue: "Uninstalling…",
+                        })
+                      : t("agents.cancelInstructions", {
+                          defaultValue: "Uninstall Skill",
+                        })}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
+      </div>
 
       <ConfirmDialog
         isOpen={confirmCancel}
@@ -944,9 +960,42 @@ export function AgentsPanel(_props: AgentsPanelProps) {
         onConfirm={() => void deleteSubagent()}
         onCancel={() => setConfirmDelete(null)}
       />
-
     </div>
   );
+}
+
+/** 角色 → 默认 worker：default 角色第一个 → worker 角色第一个 → explorer 角色第一个 → 空。 */
+function deriveWorkerName(roleAgents: CodexAgentWorkflowRoleAgents): string {
+  return (
+    roleAgents.default[0] ??
+    roleAgents.worker[0] ??
+    roleAgents.explorer[0] ??
+    ""
+  );
+}
+
+/** 全部角色选中的 agent 并集（去重）。 */
+function roleUnion(roleAgents: CodexAgentWorkflowRoleAgents): string[] {
+  return Array.from(
+    new Set([
+      ...roleAgents.default,
+      ...roleAgents.worker,
+      ...roleAgents.explorer,
+    ]),
+  );
+}
+
+function agentTypeLabel(
+  agentType: string,
+  t: (key: string, options?: { defaultValue?: string }) => string,
+): string {
+  if (agentType === "explorer") {
+    return t("agents.roleExplorer", { defaultValue: "Explorer" });
+  }
+  if (agentType === "default") {
+    return t("agents.roleDefault", { defaultValue: "Default" });
+  }
+  return t("agents.roleWorker", { defaultValue: "Worker" });
 }
 
 function sandboxLabel(
@@ -1014,16 +1063,6 @@ interface ReusableCodexProvider {
   wireApi: CodexMemberWireApi;
 }
 
-/** 从 URL 提取 host（去掉 www. 前缀），用于外部导入描述自动预填。 */
-function hostFromUrl(url: string): string {
-  try {
-    const host = new URL(url.trim()).hostname;
-    return host.replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
-
 /** 从 model 推导安全 agent 名称（[A-Za-z0-9][A-Za-z0-9_-]{0,63}）；推导失败返回空串。 */
 export function slugifyAgentName(model: string): string {
   const slug = model
@@ -1089,10 +1128,8 @@ function SubagentFormDialog({
 
   const [source, setSource] = useState<"reuse" | "external">("reuse");
   const [selectedProviderId, setSelectedProviderId] = useState("");
-  /** 描述/名称是否由用户手动编辑过：一旦编辑，自动预填不再覆盖。 */
-  const descriptionUserEdited = useRef(false);
   const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [agentType, setAgentType] = useState("worker");
   const [model, setModel] = useState("");
   const [modelProviderId, setModelProviderId] = useState("");
   const [modelBaseUrl, setModelBaseUrl] = useState("");
@@ -1111,14 +1148,17 @@ function SubagentFormDialog({
     if (!open) return;
     setSource("reuse");
     setSelectedProviderId("");
-    descriptionUserEdited.current = false;
     setApiKey("");
     setReuseApiKey("");
     setModelCandidates([]);
     setFormError("");
     if (editing) {
       setName(editing.name);
-      setDescription(editing.description);
+      setAgentType(
+        AGENT_TYPES.includes(editing.agentType as AgentType)
+          ? editing.agentType
+          : "worker",
+      );
       setModel(editing.model);
       setModelProviderId(editing.modelProviderId);
       setModelBaseUrl(editing.modelBaseUrl);
@@ -1129,7 +1169,7 @@ function SubagentFormDialog({
       );
     } else {
       setName("");
-      setDescription("");
+      setAgentType("worker");
       setModel("");
       setModelProviderId("");
       setModelBaseUrl("");
@@ -1153,34 +1193,22 @@ function SubagentFormDialog({
     );
     const firstModel = provider.storedModels[0] ?? "";
     setModel(firstModel);
-    // 复用供应商时按模型名自动预填名称与描述；名称始终跟随当前模型。
+    // 复用供应商时按模型名自动预填名称；名称始终跟随当前模型。
     if (firstModel) {
       setName(slugifyAgentName(firstModel));
-    }
-    if (!descriptionUserEdited.current) {
-      setDescription(
-        firstModel ? `${firstModel} worker` : `${provider.name} worker`,
-      );
     }
   };
 
   const handleExternalUrlChange = (url: string) => {
     setModelBaseUrl(url);
-    if (editing || descriptionUserEdited.current || model.trim()) return;
-    const host = hostFromUrl(url);
-    if (host) setDescription(`${host} worker`);
   };
 
   const handleModelChange = (value: string) => {
     setModel(value);
-    // 新建时按模型名自动预填描述/名称（复用供应商与外部导入一致）。
-    // 名称始终跟随当前模型；描述仅在用户未手改时自动填充。
+    // 新建时按模型名自动预填名称（复用供应商与外部导入一致）。
     if (editing) return;
     const trimmed = value.trim();
     if (!trimmed) return;
-    if (!descriptionUserEdited.current) {
-      setDescription(`${trimmed} worker`);
-    }
     setName(slugifyAgentName(trimmed));
   };
 
@@ -1259,14 +1287,6 @@ function SubagentFormDialog({
       );
       return;
     }
-    if (!description.trim()) {
-      setFormError(
-        t("agents.descriptionRequired", {
-          defaultValue: "Description is required",
-        }),
-      );
-      return;
-    }
     if (!editing && !keyForSave) {
       setFormError(
         t("agents.apiKeyRequired", {
@@ -1280,7 +1300,9 @@ function SubagentFormDialog({
     try {
       await codexAgentWorkflowApi.upsertSubagent({
         name: trimmedName,
-        description: description.trim(),
+        // 描述由后端按类型自动生成（编辑时保留现有描述），表单不再要求输入。
+        description: "",
+        agentType,
         model: model.trim(),
         modelProviderId: providerId,
         modelBaseUrl: modelBaseUrl.trim(),
@@ -1534,34 +1556,32 @@ function SubagentFormDialog({
           </Field>
           <div className="min-w-0 sm:col-span-2">
             <Field
-              id="subagent-description"
-              label={t("agents.formDescription", {
-                defaultValue: "Description",
+              id="subagent-agent-type"
+              label={t("agents.formAgentType", {
+                defaultValue: "Role type",
               })}
-              hint={t("agents.formDescriptionHint", {
+              hint={t("agents.formAgentTypeHint", {
                 defaultValue:
-                  "Written into the Workflow Skill's Registered subagents section and used by Codex to decide when to delegate. Describe specialty, boundaries, and when to use.",
+                  "Description and developer instructions are generated automatically from the role type. The Workflow Skill dispatches by role.",
               })}
             >
-              <textarea
-                id="subagent-description"
-                value={description}
-                onFocus={(event) => {
-                  // 自动预填的描述在聚焦时全选，用户直接输入即替换，避免追加拼接。
-                  if (!descriptionUserEdited.current && description) {
-                    event.target.select();
-                  }
-                }}
-                onChange={(event) => {
-                  descriptionUserEdited.current = true;
-                  setDescription(event.target.value);
-                }}
-                placeholder={t("agents.formDescriptionPlaceholder", {
-                  defaultValue: "What this subagent is for",
-                })}
-                rows={3}
-                className="min-h-20 w-full resize-y rounded-md border border-border-default bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:focus:ring-blue-400/20 disabled:cursor-not-allowed disabled:opacity-50 whitespace-pre-wrap break-words"
-              />
+              <Select value={agentType} onValueChange={setAgentType}>
+                <SelectTrigger
+                  className="h-8"
+                  aria-label={t("agents.formAgentType", {
+                    defaultValue: "Role type",
+                  })}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {AGENT_TYPES.map((type) => (
+                    <SelectItem key={type} value={type}>
+                      {agentTypeLabel(type, t)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </Field>
           </div>
         </div>

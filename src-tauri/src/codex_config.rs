@@ -501,6 +501,73 @@ pub fn codex_live_auth_is_stale_third_party_residue(live_auth: &Value) -> bool {
 /// safety depends on it — do not align the two guards.
 ///
 /// Returns Ok(true) when the file was deleted.
+/// True when the active Codex provider is the app-managed "custom official
+/// fallback" shape: `model_provider = "custom"` with `[model_providers.custom]`
+/// declaring `requires_openai_auth = true` and no `base_url`. In this shape
+/// Codex sends `auth.json`'s `OPENAI_API_KEY` to api.openai.com, so a stale
+/// third-party key (left behind by an earlier provider switch) yields a 401.
+///
+/// Deliberately conservative: built-in `openai` / no-`model_provider` configs
+/// also route to api.openai.com, but there `auth.json`'s key is the legitimate
+/// official API-key login and must survive restore — the switch-time cleanup
+/// (`clear_stale_codex_live_auth_after_official_switch`) already handles those
+/// cases with a DB-backed staleness check.
+pub fn codex_config_uses_official_auth_fallback(config_text: &str) -> bool {
+    let Ok(doc) = config_text.parse::<DocumentMut>() else {
+        // 解析失败按最保守处理：视为官方回落，避免把第三方 key 留给官方端点。
+        return true;
+    };
+    let Some(provider_id) = active_codex_model_provider_id(&doc) else {
+        return false;
+    };
+    if !is_custom_codex_model_provider_id(&provider_id) {
+        return false;
+    }
+    let Some(custom) = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get(provider_id.as_str()))
+        .and_then(|item| item.as_table())
+    else {
+        return false;
+    };
+    let has_base_url = custom
+        .get("base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(|url| !url.is_empty());
+    !has_base_url
+        && custom
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+}
+
+/// After restoring a Codex live config that routes to the official endpoint,
+/// delete a stale third-party `OPENAI_API_KEY` left in `auth.json` so Codex
+/// shows its login screen instead of sending the wrong key to api.openai.com
+/// (401 invalid_api_key). No-op when the restored config keeps a custom
+/// `base_url` (the key may belong to that third-party endpoint) or when
+/// `auth.json` carries real login material. Deleting — not writing `{}` — is
+/// deliberate, matching [`clear_stale_codex_live_auth_after_official_switch`].
+///
+/// Returns Ok(true) when the file was deleted.
+pub fn clear_stale_codex_live_auth_if_official_route(config_text: &str) -> Result<bool, AppError> {
+    if !codex_config_uses_official_auth_fallback(config_text) {
+        return Ok(false);
+    }
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return Ok(false);
+    }
+    let live_auth: Value = read_json_file(&auth_path)?;
+    if !codex_live_auth_is_stale_third_party_residue(&live_auth) {
+        return Ok(false);
+    }
+    delete_file(&auth_path)?;
+    Ok(true)
+}
+
 pub fn clear_stale_codex_live_auth_after_official_switch(
     db_auth: &Value,
 ) -> Result<bool, AppError> {
@@ -3832,6 +3899,71 @@ experimental_bearer_token = "stale-table-key"
         assert!(!codex_live_auth_is_stale_third_party_residue(&json!({
             "OPENAI_API_KEY": ""
         })));
+    }
+
+    #[test]
+    fn official_auth_fallback_detection() {
+        // 官方回落形态：custom + requires_openai_auth + 无 base_url。
+        assert!(codex_config_uses_official_auth_fallback(
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+requires_openai_auth = true
+wire_api = "responses"
+"#
+        ));
+        assert!(codex_config_uses_official_auth_fallback(
+            r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        ));
+
+        // 带任何 base_url（第三方 / 代理 / 显式官方）都不是回落形态，
+        // 恢复必须原样保留 auth.json 里的 key。
+        assert!(!codex_config_uses_official_auth_fallback(
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "opencode"
+base_url = "https://opencode.ai/zen/go/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        ));
+        assert!(!codex_config_uses_official_auth_fallback(
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "multi-provider"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#
+        ));
+        assert!(!codex_config_uses_official_auth_fallback(
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.openai.com/v1"
+wire_api = "responses"
+"#
+        ));
+
+        // 内建 openai / 无 model_provider / 非 custom provider：auth.json 的
+        // key 是官方 API key 登录的合法载体，恢复必须保留。
+        assert!(!codex_config_uses_official_auth_fallback(""));
+        assert!(!codex_config_uses_official_auth_fallback(
+            "model_provider = \"openai\"\n"
+        ));
+        assert!(!codex_config_uses_official_auth_fallback(
+            "model_provider = \"b\"\nmodel = \"gpt-5.1\"\n"
+        ));
     }
 
     #[test]
