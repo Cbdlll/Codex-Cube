@@ -200,10 +200,11 @@ pub fn install_codex_agent_workflow(
     }
     selected.sort();
     selected.dedup();
-    let worker_name = if payload.worker_agent.trim().is_empty() {
-        codex_agent_workflow::derive_worker_agent(&role_agents)
-    } else {
+    let derived_worker = codex_agent_workflow::derive_worker_agent(&role_agents);
+    let worker_name = if derived_worker.trim().is_empty() {
         payload.worker_agent.trim().to_string()
+    } else {
+        derived_worker
     };
     let worker = agents
         .iter()
@@ -317,17 +318,34 @@ pub(crate) fn install_workflow_skill(
         )
         .map_err(|error| AppError::Message(error.to_string()))?;
         let selected = role_agents.union();
-        codex_agent_workflow::install(
+        // Codex 的全局 fallback 必须跟随应用当前选定的默认 worker：
+        // default[0] → worker[0] → explorer[0]。旧 payload/manifest 可能没有
+        // role_agents，此时回退到传入的 worker_agent，保持历史安装可刷新。
+        let default_worker_name = {
+            let derived = codex_agent_workflow::derive_worker_agent(role_agents);
+            if derived.trim().is_empty() {
+                worker_agent.trim().to_owned()
+            } else {
+                derived
+            }
+        };
+        let default_worker = agents
+            .iter()
+            .find(|agent| agent.name == default_worker_name)
+            .ok_or_else(|| {
+                AppError::Message(format!(
+                    "workflow 默认 worker {} 未在可用 subagent 列表中找到",
+                    default_worker_name
+                ))
+            })?;
+        codex_agent_workflow::install_with_agent_defaults(
             config_dir,
             worker_agent,
             &selected,
             role_agents,
             codex_agent_workflow::WORKFLOW_MODE_SKILL,
-            agents
-                .iter()
-                .find(|agent| agent.name == worker_agent)
-                .map(|agent| agent.reasoning_effort.as_str())
-                .unwrap_or_default(),
+            default_worker.reasoning_effort.as_str(),
+            default_worker.model.as_str(),
         )
     })();
     if let Err(error) = result {
@@ -372,6 +390,12 @@ pub(crate) fn refresh_workflow_skill_if_installed(app_state: &AppState) -> Resul
     let role_agents = if legacy {
         let mut role = codex_agent_workflow::RoleAgents::default();
         role.worker = codex_agent_workflow::selected_agents(&config_dir)?;
+        // Legacy manifests did not persist role priority. Preserve the manifest's
+        // explicit worker as the first/default entry during refresh.
+        if !manifest.worker_agent.trim().is_empty() {
+            role.worker.retain(|name| name != &manifest.worker_agent);
+            role.worker.insert(0, manifest.worker_agent.clone());
+        }
         role
     } else {
         manifest.role_agents.clone()
@@ -382,6 +406,16 @@ pub(crate) fn refresh_workflow_skill_if_installed(app_state: &AppState) -> Resul
     } else {
         codex_agent_workflow::derive_worker_agent(&role_agents)
     };
+    // The fallback defaults are sourced from the same app-selected default worker.
+    // If that worker is currently unavailable, leave the installed workflow untouched
+    // and let the next refresh retry after the subagent becomes available.
+    let default_worker_name = codex_agent_workflow::derive_worker_agent(&role_agents);
+    if !managed_agents
+        .iter()
+        .any(|agent| agent.name == default_worker_name)
+    {
+        return Ok(());
+    }
     install_workflow_skill(
         app_state,
         &managed_agents,
@@ -551,6 +585,39 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn workflow_skill_install_uses_role_selected_default_for_codex_fallback() {
+        let (_home, _home_guard, _location_guard, app_state) = setup();
+        let worker = register_subagent_with_reasoning("worker-agent", "xhigh");
+        let mut default_payload = upsert_payload("default-agent", "通用默认 worker");
+        default_payload.model = "deepseek-v4-pro".to_owned();
+        default_payload.reasoning_effort = "max".to_owned();
+        default_payload.agent_type = Some(codex_subagents::AGENT_TYPE_DEFAULT.to_owned());
+        let default_worker = codex_subagents::upsert_subagent(&default_payload).unwrap();
+        let config_dir = crate::codex_config::get_codex_config_dir();
+        let role_agents = codex_agent_workflow::RoleAgents {
+            worker: vec![worker.name.clone()],
+            explorer: Vec::new(),
+            default: vec![default_worker.name.clone()],
+        };
+
+        // worker_agent can be supplied by an older/stale caller. Global fallback must
+        // still follow the app role selection rather than this compatibility field.
+        install_workflow_skill(
+            &app_state,
+            &[worker, default_worker],
+            &role_agents,
+            "worker-agent",
+            &config_dir,
+        )
+        .unwrap();
+
+        let config = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(config.contains("default_subagent_model = \"deepseek-v4-pro\""));
+        assert!(config.contains("default_subagent_reasoning_effort = \"max\""));
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn install_workflow_skill_removes_legacy_subagent_workflow() {
         let (_home, _home_guard, _location_guard, app_state) = setup();
         let record = register_subagent("deepseek-flash", "适合前端重构");
@@ -635,6 +702,9 @@ mod tests {
         assert!(status
             .skill_content
             .is_some_and(|content| content.contains("reasoning: max")));
+        let config = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(config.contains("default_subagent_model = \"deepseek-v4-flash\""));
+        assert!(config.contains("default_subagent_reasoning_effort = \"max\""));
     }
 
     #[test]

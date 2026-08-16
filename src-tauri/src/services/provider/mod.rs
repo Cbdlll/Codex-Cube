@@ -1059,19 +1059,20 @@ impl ProviderService {
                 )
                 .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
 
-                if futures::executor::block_on(state.proxy_service.is_running()) {
-                    if live_taken_over && matches!(app_type, AppType::Codex) {
-                        // Codex model mappings are projected into a generated
-                        // model_catalog_json file. Refresh takeover-owned Live
-                        // immediately so adding/removing mappings cannot leave
-                        // the previous catalog pointer and capabilities active.
-                        futures::executor::block_on(
-                            state
-                                .proxy_service
-                                .sync_codex_live_from_provider_while_proxy_active(&provider),
-                        )
-                        .map_err(|e| AppError::Message(format!("同步 Codex Live 配置失败: {e}")))?;
-                    }
+                if futures::executor::block_on(state.proxy_service.is_running())
+                    && matches!(app_type, AppType::Codex)
+                {
+                    // A Live backup is also an ownership signal. Aggregate takeover may
+                    // have no auth.json placeholder, so live_taken_over alone can be false
+                    // even while config.toml still points at the running local proxy.
+                    // Re-project the current provider immediately so defaultModel and
+                    // model-catalog edits cannot leave stale takeover-owned Live fields.
+                    futures::executor::block_on(
+                        state
+                            .proxy_service
+                            .sync_codex_live_from_provider_while_proxy_active(&provider),
+                    )
+                    .map_err(|e| AppError::Message(format!("同步 Codex Live 配置失败: {e}")))?;
                 }
             } else {
                 write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;

@@ -4,9 +4,12 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use toml_edit::{value, DocumentMut, Item, TableLike};
 
 pub const WORKFLOW_MANIFEST_FILENAME: &str = "codex-cube-agent-workflow.json";
 pub const WORKFLOW_BACKUP_FILENAME: &str = "codex-cube-workflow-instructions-backup.json";
+pub const WORKFLOW_AGENT_DEFAULTS_BACKUP_FILENAME: &str =
+    "codex-cube-workflow-agent-defaults-backup.json";
 pub const WORKFLOW_SKILL_NAME: &str = "cube-dispatch";
 pub const WORKFLOW_SKILL_DIRECTORY: &str = "cube-dispatch";
 pub const WORKFLOW_SKILL_DB_ID: &str = "local:cube-dispatch";
@@ -112,6 +115,22 @@ pub fn backup_path(config_dir: &Path) -> PathBuf {
     config_dir.join(WORKFLOW_BACKUP_FILENAME)
 }
 
+pub fn agent_defaults_backup_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(WORKFLOW_AGENT_DEFAULTS_BACKUP_FILENAME)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WorkflowAgentDefaultsBackup {
+    #[serde(default)]
+    had_config_file: bool,
+    #[serde(default)]
+    had_agents_table: bool,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+}
+
 pub fn instructions_path(config_dir: &Path) -> PathBuf {
     config_dir.join("AGENTS.md")
 }
@@ -139,11 +158,178 @@ fn read_backup(config_dir: &Path) -> Result<Option<WorkflowBackup>, AppError> {
     }
 }
 
+fn read_agent_defaults_backup(
+    config_dir: &Path,
+) -> Result<Option<WorkflowAgentDefaultsBackup>, AppError> {
+    let path = agent_defaults_backup_path(config_dir);
+    match read_optional_text(&path)? {
+        Some(text) => serde_json::from_str::<WorkflowAgentDefaultsBackup>(&text)
+            .map(Some)
+            .map_err(|error| AppError::Message(format!("解析 subagent 默认配置备份失败: {error}"))),
+        None => Ok(None),
+    }
+}
+
+fn agents_table_mut(doc: &mut DocumentMut) -> Result<&mut dyn TableLike, AppError> {
+    if doc.get("agents").is_none() {
+        doc["agents"] = toml_edit::table();
+    }
+    doc.get_mut("agents")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| {
+            AppError::Config("config.toml 的 [agents] 必须是表或内联表".to_string())
+        })
+}
+
+fn capture_agent_defaults_backup(
+    config_text: Option<&str>,
+) -> Result<WorkflowAgentDefaultsBackup, AppError> {
+    let Some(config_text) = config_text else {
+        return Ok(WorkflowAgentDefaultsBackup {
+            had_config_file: false,
+            had_agents_table: false,
+            model: None,
+            reasoning_effort: None,
+        });
+    };
+    let doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("解析 Codex config.toml 失败: {error}")))?;
+    let agents = match doc.get("agents") {
+        None => {
+            return Ok(WorkflowAgentDefaultsBackup {
+                had_config_file: true,
+                had_agents_table: false,
+                model: None,
+                reasoning_effort: None,
+            });
+        }
+        Some(item) => item.as_table_like().ok_or_else(|| {
+            AppError::Config("config.toml 的 [agents] 必须是表或内联表".to_string())
+        })?,
+    };
+    let read_string = |key: &str| -> Result<Option<String>, AppError> {
+        let Some(item) = agents.get(key) else {
+            return Ok(None);
+        };
+        let Some(value) = item.as_str() else {
+            return Err(AppError::Message(format!(
+                "config.toml 的 [agents].{key} 必须是字符串"
+            )));
+        };
+        Ok(Some(value.to_owned()))
+    };
+    Ok(WorkflowAgentDefaultsBackup {
+        had_config_file: true,
+        had_agents_table: true,
+        model: read_string("default_subagent_model")?,
+        reasoning_effort: read_string("default_subagent_reasoning_effort")?,
+    })
+}
+
+/// 将 Workflow 当前默认 worker 的模型/推理档位写入 Codex 的 subagent fallback 配置。
+/// 首次安装时保存原值；重复安装只更新值，不覆盖原始备份。
+pub fn sync_agent_defaults(
+    config_dir: &Path,
+    model: &str,
+    reasoning_effort: &str,
+) -> Result<(), AppError> {
+    let model = model.trim();
+    let reasoning_effort = reasoning_effort.trim();
+    if model.is_empty() || reasoning_effort.is_empty() {
+        return Err(AppError::InvalidInput(
+            "workflow 默认 worker 的 model/reasoning_effort 不能为空".into(),
+        ));
+    }
+
+    let config_path = config_dir.join("config.toml");
+    let backup_path = agent_defaults_backup_path(config_dir);
+    let current_config = read_optional_text(&config_path)?;
+    let backup_exists = read_agent_defaults_backup(config_dir)?.is_some();
+    let backup = if backup_exists {
+        None
+    } else {
+        Some(capture_agent_defaults_backup(current_config.as_deref())?)
+    };
+
+    // Validate and construct the complete next config before creating the lifecycle backup.
+    // A malformed existing [agents] value must fail without leaving install state behind.
+    let mut doc = current_config
+        .as_deref()
+        .unwrap_or_default()
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("解析 Codex config.toml 失败: {error}")))?;
+    let agents = agents_table_mut(&mut doc)?;
+    agents.insert("default_subagent_model", value(model));
+    agents.insert("default_subagent_reasoning_effort", value(reasoning_effort));
+
+    if let Some(backup) = backup {
+        write_private_json(&backup_path, &backup)?;
+    }
+    if let Err(error) = write_text_file(&config_path, &doc.to_string()) {
+        if !backup_exists {
+            let _ = delete_file(&backup_path);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// 恢复 Workflow 安装前的 subagent fallback 配置，仅触碰 Workflow 管理的两个键。
+pub fn restore_agent_defaults(config_dir: &Path) -> Result<(), AppError> {
+    let Some(backup) = read_agent_defaults_backup(config_dir)? else {
+        return Ok(());
+    };
+    let config_path = config_dir.join("config.toml");
+    let Some(config_text) = read_optional_text(&config_path)? else {
+        if backup.had_config_file {
+            return Err(AppError::Config(
+                "Codex config.toml 在 Workflow 卸载前已被删除，无法安全恢复原配置".to_string(),
+            ));
+        }
+        delete_file(&agent_defaults_backup_path(config_dir))?;
+        return Ok(());
+    };
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("解析 Codex config.toml 失败: {error}")))?;
+    let agents = agents_table_mut(&mut doc)?;
+    match backup.model {
+        Some(model) => {
+            agents.insert("default_subagent_model", value(model));
+        }
+        None => {
+            agents.remove("default_subagent_model");
+        }
+    }
+    match backup.reasoning_effort {
+        Some(effort) => {
+            agents.insert("default_subagent_reasoning_effort", value(effort));
+        }
+        None => {
+            agents.remove("default_subagent_reasoning_effort");
+        }
+    }
+    let remove_agents_table = !backup.had_agents_table && agents.is_empty();
+    if remove_agents_table {
+        doc.as_table_mut().remove("agents");
+    }
+    let restored_config = doc.to_string();
+    if !backup.had_config_file && restored_config.trim().is_empty() {
+        delete_file(&config_path)?;
+    } else {
+        write_text_file(&config_path, &restored_config)?;
+    }
+    delete_file(&agent_defaults_backup_path(config_dir))
+}
+
 /// 是否可以取消/恢复：有效备份存在 → true；无备份但 AGENTS.md 含受管块或
 /// workflow manifest 存在 → true（cancel 仍可清理/恢复）；全部缺失 → false。
 /// 备份不可读/损坏/结构非法 → 错误。不要用 backup_path().exists() 判断。
 pub fn can_undo(config_dir: &Path) -> Result<bool, AppError> {
-    if read_backup(config_dir)?.is_some() {
+    let has_workflow_backup = read_backup(config_dir)?.is_some();
+    let has_agent_defaults_backup = read_agent_defaults_backup(config_dir)?.is_some();
+    if has_workflow_backup || has_agent_defaults_backup {
         return Ok(true);
     }
     if load_manifest(config_dir)?.is_some() {
@@ -375,22 +561,38 @@ Never call a tool that is not in the current tool list.\n\
 - Inspect the current spawn tool schema before dispatching. If the selected registered agent \
 name appears in the allowed `agent_type` values, pass that exact name as `agent_type`; this is \
 the primary path and loads the custom agent file directly.\n\
+- For a generic-role fallback, the registered `model` and `reasoning_effort` are mandatory spawn \
+arguments. An exact custom `agent_type` selects the registered routing profile; a generic role does \
+not.\n\
 - If the registered name is not an allowed `agent_type`, use the allowed generic role matching \
 the subagent's registered type (`worker` for worker-typed, `explorer` for explorer-typed, \
-`default` for default-typed) and pass `model` and `reasoning_effort` explicitly with the \
-registered per-agent values. This is a compatibility fallback for sessions whose tool schema \
-does not expose custom agent types. Never invent or pass an `agent_type` value absent from \
-the current schema.\n\
+`default` for default-typed) and pass the registered `model` and `reasoning_effort` explicitly. \
+This is a compatibility fallback for sessions whose tool schema does not expose custom agent \
+types. A generic-role spawn without both explicit fields is invalid: do not send it; report that \
+the registered subagent cannot be dispatched on this Codex surface. In particular, never send \
+`agent_type: "explorer"` or `agent_type: "worker"` by itself for a registered custom agent, and \
+never invent or pass an `agent_type` value absent from the current schema.\n\
+- Required fallback shape (replace the values with the selected registered agent): \
+`{\"task_name\":\"...\",\"agent_type\":\"explorer\",\"model\":\"deepseek-v4-flash\",\"reasoning_effort\":\"max\",\"fork_turns\":\"none\",\"message\":\"...\"}`. \
+If either `model` or `reasoning_effort` is missing from the tool schema, stop instead of spawning; \
+do not let the parent conversation fill the missing value.\n\
 - For fallback dispatch, resolution order is: explicit spawn value > custom agent file > `[agents]` \
-defaults (`default_subagent_model`, `default_subagent_reasoning_effort`) > parent value.\n\
-- Treat a successful compatibility fallback as normal dispatch; do not add a user-facing caveat \
-solely because the registered custom `agent_type` was unavailable. Report it only if delegation \
-fails or the fallback changes requested behavior.\n\
+defaults (`default_subagent_model`, `default_subagent_reasoning_effort`) > parent value. Because \
+parent inheritance can select the wrong model, never rely on the parent value for a dispatch.\n\
+- After every generic-role fallback, verify the child thread metadata reports the registered model \
+and reasoning effort. If it reports the coordinator's model or another unregistered model, \
+stop/interrupt that worker, report dispatch failure, and do not accept its result as work from the \
+selected subagent.\n\
+- Treat a successful compatibility fallback as normal dispatch only after the child metadata \
+confirms the registered model and effort; do not add a user-facing caveat solely because the \
+custom `agent_type` was unavailable. Report it if verification fails or the fallback changes the \
+requested behavior.\n\
 - Use the same registered reasoning_effort on every round and when resuming; never let \
 the worker run at a different effort than registered.\n\
 - Codex handles spawning, follow-up routing, waiting for results, and closing threads; \
 you can also steer, stop, or close a subagent with a direct request.\n\n",
     );
+
     output.push_str(
         "## Troubleshooting\n\
 - If a worker reports receiving only wrapper/developer instructions (for example \
@@ -472,6 +674,41 @@ pub fn validate_agent_name(name: &str) -> Result<(), AppError> {
         return Err(AppError::InvalidInput(format!(
             "agent 名称 {name:?} 不是安全文件名（要求 [A-Za-z0-9][A-Za-z0-9_-]{{0,63}}）"
         )));
+    }
+    Ok(())
+}
+
+/// 安装 Workflow，并把当前默认 worker 的模型/推理档位同步到 Codex fallback 配置。
+/// 安装失败时恢复安装前的 config.toml 与 fallback 备份状态。
+pub fn install_with_agent_defaults(
+    config_dir: &Path,
+    worker_agent: &str,
+    worker_agents: &[String],
+    role_agents: &RoleAgents,
+    mode: &str,
+    reasoning_effort: &str,
+    default_model: &str,
+) -> Result<(), AppError> {
+    let config_path = config_dir.join("config.toml");
+    let original_config = read_optional_text(&config_path)?;
+    let defaults_backup = agent_defaults_backup_path(config_dir);
+    let original_defaults_backup = read_optional_text(&defaults_backup)?;
+    if let Err(error) = sync_agent_defaults(config_dir, default_model, reasoning_effort) {
+        restore_optional_file(&config_path, original_config.as_deref()).ok();
+        restore_optional_file(&defaults_backup, original_defaults_backup.as_deref()).ok();
+        return Err(error);
+    }
+    if let Err(error) = install(
+        config_dir,
+        worker_agent,
+        worker_agents,
+        role_agents,
+        mode,
+        reasoning_effort,
+    ) {
+        restore_optional_file(&config_path, original_config.as_deref()).ok();
+        restore_optional_file(&defaults_backup, original_defaults_backup.as_deref()).ok();
+        return Err(error);
     }
     Ok(())
 }
@@ -558,6 +795,7 @@ pub fn cancel(config_dir: &Path) -> Result<(), AppError> {
     let existing = read_optional_text(&instructions_file)?;
     if let Some(backup) = read_backup(config_dir)? {
         restore_optional_file(&instructions_file, backup.instructions_md.as_deref())?;
+        restore_agent_defaults(config_dir)?;
         delete_file(&manifest_path(config_dir))?;
         delete_file(&backup_file)?;
         return Ok(());
@@ -569,6 +807,7 @@ pub fn cancel(config_dir: &Path) -> Result<(), AppError> {
     } else {
         write_text_file(&instructions_file, &without)?;
     }
+    restore_agent_defaults(config_dir)?;
     delete_file(&manifest_path(config_dir))
 }
 
@@ -809,6 +1048,108 @@ mod tests {
 
         cancel(temp.path()).unwrap();
         assert!(!instructions_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn sync_and_restore_agent_defaults_preserve_existing_agents_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "model = \"gpt-5.6-sol\"\n\n[agents]\nenabled = true\ndefault_subagent_model = \"old-model\"\ndefault_subagent_reasoning_effort = \"low\"\n",
+        )
+        .unwrap();
+
+        sync_agent_defaults(temp.path(), "deepseek-v4-flash", "max").unwrap();
+        let synced = std::fs::read_to_string(&config).unwrap();
+        assert!(synced.contains("enabled = true"));
+        assert!(synced.contains("default_subagent_model = \"deepseek-v4-flash\""));
+        assert!(synced.contains("default_subagent_reasoning_effort = \"max\""));
+        assert!(agent_defaults_backup_path(temp.path()).exists());
+
+        restore_agent_defaults(temp.path()).unwrap();
+        let restored = std::fs::read_to_string(&config).unwrap();
+        assert!(restored.contains("enabled = true"));
+        assert!(restored.contains("default_subagent_model = \"old-model\""));
+        assert!(restored.contains("default_subagent_reasoning_effort = \"low\""));
+        assert!(!agent_defaults_backup_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn sync_and_restore_agent_defaults_remove_generated_config_when_absent_initially() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+
+        sync_agent_defaults(temp.path(), "deepseek-v4-flash", "max").unwrap();
+        assert!(config.exists());
+        restore_agent_defaults(temp.path()).unwrap();
+
+        assert!(!config.exists());
+        assert!(!agent_defaults_backup_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn sync_agent_defaults_rejects_invalid_agents_value_without_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(&config, "agents = \"not-a-table\"\n").unwrap();
+
+        let error = sync_agent_defaults(temp.path(), "deepseek-v4-flash", "max").unwrap_err();
+        assert!(error.to_string().contains("[agents]"));
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "agents = \"not-a-table\"\n");
+        assert!(!agent_defaults_backup_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn install_with_agent_defaults_rolls_back_sync_when_workflow_install_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(&config, "model = \"gpt-5.6-sol\"\n").unwrap();
+
+        let error = install_with_agent_defaults(
+            temp.path(),
+            "../invalid",
+            &[],
+            &RoleAgents::default(),
+            WORKFLOW_MODE_SKILL,
+            "max",
+            "deepseek-v4-flash",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("agent 名称"));
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "model = \"gpt-5.6-sol\"\n");
+        assert!(!agent_defaults_backup_path(temp.path()).exists());
+        assert!(!manifest_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn cancel_restores_agent_defaults_on_workflow_backup_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[agents]\nenabled = true\ndefault_subagent_model = \"old-model\"\ndefault_subagent_reasoning_effort = \"low\"\n",
+        )
+        .unwrap();
+
+        install_with_agent_defaults(
+            temp.path(),
+            "worker",
+            &["worker".to_string()],
+            &RoleAgents::default(),
+            WORKFLOW_MODE_SKILL,
+            "max",
+            "deepseek-v4-flash",
+        )
+        .unwrap();
+        assert!(agent_defaults_backup_path(temp.path()).exists());
+
+        cancel(temp.path()).unwrap();
+        let restored = std::fs::read_to_string(&config).unwrap();
+        assert!(restored.contains("enabled = true"));
+        assert!(restored.contains("default_subagent_model = \"old-model\""));
+        assert!(restored.contains("default_subagent_reasoning_effort = \"low\""));
+        assert!(!agent_defaults_backup_path(temp.path()).exists());
     }
 
     #[test]
@@ -1388,6 +1729,12 @@ mod tests {
         assert!(markdown.contains("use the allowed generic role matching"));
         assert!(markdown.contains("`worker` for worker-typed, `explorer` for explorer-typed"));
         assert!(markdown.contains("pass `model` and `reasoning_effort` explicitly"));
+        assert!(markdown.contains("Required fallback shape"));
+        assert!(markdown.contains(
+            r#"{"task_name":"...","agent_type":"explorer","model":"deepseek-v4-flash","reasoning_effort":"max""#
+        ));
+        assert!(markdown.contains("`agent_type: \"explorer\"` or `agent_type: \"worker\"`"));
+        assert!(markdown.contains("do not let the parent conversation fill the missing value"));
         assert!(markdown.contains("`worker` role list (first listed agent wins)"));
         assert!(markdown
             .contains("Never invent or pass an `agent_type` value absent from the current schema"));
