@@ -29,7 +29,6 @@ import type {
   ToolInstallation,
   ToolInstallationReport,
 } from "@/lib/api/settings";
-import { useUpdate } from "@/contexts/UpdateContext";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import { CodexIcon } from "@/components/BrandIcons";
@@ -135,7 +134,6 @@ function mergeToolVersions(
 }
 
 export function AboutSection({ isPortable }: AboutSectionProps) {
-  // ... (use hooks as before) ...
   const { t } = useTranslation();
   // 惰性初始化自模块缓存：重挂时首帧即渲染上次的值，避免 loading 闪烁；首次挂载缓存
   // 为空则回退到原始初值（null / loading）。
@@ -143,7 +141,6 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const [isLoadingVersion, setIsLoadingVersion] = useState(
     () => appVersionCache === null,
   );
-  const [isDownloading, setIsDownloading] = useState(false);
   const [toolVersions, setToolVersions] = useState<ToolVersion[]>(
     () => toolVersionsCache?.data ?? [],
   );
@@ -159,9 +156,6 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     null,
   );
   const [showInstallCommands, setShowInstallCommands] = useState(false);
-
-  const { hasUpdate, updateInfo, checkUpdate, resetDismiss, isChecking } =
-    useUpdate();
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -193,15 +187,6 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const toolVersionByName = useMemo(() => {
     return new Map(toolVersions.map((tool) => [tool.name, tool]));
   }, [toolVersions]);
-
-  const updatableToolNames = useMemo(
-    () =>
-      TOOL_NAMES.filter((toolName) => {
-        const tool = toolVersionByName.get(toolName);
-        return isUpdateAvailable(tool?.version, tool?.latest_version);
-      }),
-    [toolVersionByName],
-  );
 
   const refreshToolVersions = useCallback(
     async (
@@ -346,16 +331,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ... (handlers like handleOpenReleaseNotes, handleCheckUpdate) ...
-
   const handleOpenReleaseNotes = useCallback(async () => {
     try {
-      const targetVersion = updateInfo?.availableVersion ?? version ?? "";
-      const displayVersion = targetVersion.startsWith("v")
-        ? targetVersion
-        : targetVersion
-          ? `v${targetVersion}`
-          : "";
+      const displayVersion = version
+        ? version.startsWith("v")
+          ? version
+          : `v${version}`
+        : "";
 
       if (!displayVersion) {
         await settingsApi.openExternal(`${GITHUB_REPO_URL}/releases`);
@@ -369,56 +351,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       console.error("[AboutSection] Failed to open release notes", error);
       toast.error(t("settings.openReleaseNotesFailed"));
     }
-  }, [t, updateInfo?.availableVersion, version]);
-
-  const handleCheckUpdate = useCallback(async () => {
-    if (hasUpdate) {
-      if (isPortable) {
-        try {
-          await settingsApi.checkUpdates();
-        } catch (error) {
-          console.error("[AboutSection] Portable update failed", error);
-        }
-        return;
-      }
-
-      setIsDownloading(true);
-      try {
-        resetDismiss();
-        const installed = await settingsApi.installUpdateAndRestart();
-        if (!installed) {
-          toast.success(t("settings.upToDate"), { closeButton: true });
-        }
-      } catch (error) {
-        console.error("[AboutSection] Update failed", error);
-        toast.error(t("settings.updateFailed"), {
-          description: extractErrorMessage(error) || undefined,
-          closeButton: true,
-        });
-        try {
-          await settingsApi.checkUpdates();
-        } catch (fallbackError) {
-          console.error(
-            "[AboutSection] Failed to open fallback updater",
-            fallbackError,
-          );
-        }
-      } finally {
-        setIsDownloading(false);
-      }
-      return;
-    }
-
-    try {
-      const available = await checkUpdate();
-      if (!available) {
-        toast.success(t("settings.upToDate"), { closeButton: true });
-      }
-    } catch (error) {
-      console.error("[AboutSection] Check update failed", error);
-      toast.error(t("settings.checkUpdateFailed"));
-    }
-  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t]);
+  }, [t, version]);
 
   const handleCopyInstallCommands = useCallback(async () => {
     try {
@@ -806,58 +739,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               <ExternalLink className="h-3.5 w-3.5" />
               {t("settings.releaseNotes")}
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={handleCheckUpdate}
-              disabled={isChecking || isDownloading}
-              className="h-8 gap-1.5 text-xs"
-            >
-              {isDownloading ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  {t("settings.updating")}
-                </>
-              ) : hasUpdate ? (
-                <>
-                  <Download className="h-3.5 w-3.5" />
-                  {t("settings.updateTo", {
-                    version: updateInfo?.availableVersion ?? "",
-                  })}
-                </>
-              ) : isChecking ? (
-                <>
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                  {t("settings.checking")}
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  {t("settings.checkForUpdates")}
-                </>
-              )}
-            </Button>
           </div>
         </div>
-
-        {hasUpdate && updateInfo && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            className="rounded-lg bg-primary/10 border border-primary/20 px-4 py-3 text-sm"
-          >
-            <p className="font-medium text-primary mb-1">
-              {t("settings.updateAvailable", {
-                version: updateInfo.availableVersion,
-              })}
-            </p>
-            {updateInfo.notes && (
-              <p className="text-muted-foreground line-clamp-3 leading-relaxed">
-                {updateInfo.notes}
-              </p>
-            )}
-          </motion.div>
-        )}
       </motion.div>
 
       <div className="space-y-3">
@@ -894,28 +777,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               />
               {isLoadingTools ? t("common.refreshing") : t("common.refresh")}
             </Button>
-            <Button
-              size="sm"
-              className="h-7 gap-1.5 text-xs"
-              onClick={() => handleRunToolAction(updatableToolNames, "update")}
-              disabled={
-                isLoadingTools || isAnyBusy || updatableToolNames.length === 0
-              }
-            >
-              {batchAction === "update" ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <ArrowUpCircle className="h-3.5 w-3.5" />
-              )}
-              {t("settings.updateAllTools", {
-                count: updatableToolNames.length,
-              })}
-            </Button>
           </div>
         </div>
 
-        <div className="grid gap-3 px-1 sm:grid-cols-2 xl:grid-cols-3">
-          {TOOL_NAMES.map((toolName, index) => {
+        <div className="px-1">
+          {TOOL_NAMES.map((toolName) => {
             const tool = toolVersionByName.get(toolName);
             const displayName = TOOL_DISPLAY_NAMES[toolName];
             // 单卡片 loading 用「结果是否已到」而非「整批是否结束」驱动，实现渐进式刷新：
@@ -945,23 +811,48 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             const runningAction = toolActions[toolName];
             const title = tool?.version || tool?.error || t("common.unknown");
             const conflicts = toolDiagnostics[toolName];
+            const currentVersionLabel = isToolVersionLoading
+              ? t("common.loading")
+              : tool?.version
+                ? tool.version
+                : installedButBroken
+                  ? t("settings.installedNotRunnable")
+                  : t("common.notInstalled");
+            const latestVersionLabel = isToolVersionLoading
+              ? t("common.loading")
+              : tool?.latest_version || t("common.unknown");
 
             return (
               <motion.div
                 key={toolName}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.15 + index * 0.04 }}
-                className="flex min-h-[150px] flex-col gap-3 rounded-xl border border-border bg-gradient-to-br from-card/80 to-card/40 p-4 shadow-sm transition-colors hover:border-primary/30"
+                transition={{ duration: 0.3, delay: 0.15 }}
+                className="rounded-xl border border-border bg-gradient-to-br from-card/80 to-card/40 p-4 shadow-sm transition-colors hover:border-primary/30"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-background/80 text-muted-foreground">
-                      <CodexIcon size={14} />
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background/80 text-muted-foreground">
+                      <CodexIcon size={18} />
                     </span>
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">
-                        {displayName}
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm font-medium">
+                          {displayName}
+                        </span>
+                        {isToolVersionLoading ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                        ) : tool?.version ? (
+                          isOutdated ? (
+                            <span className="shrink-0 rounded-full border border-yellow-500/20 bg-yellow-500/10 px-1.5 py-0.5 text-[10px] text-yellow-600 dark:text-yellow-400">
+                              {t("settings.updateAvailableShort")}
+                            </span>
+                          ) : (
+                            <CheckCircle2 className="h-4 w-4 shrink-0 text-green-500" />
+                          )
+                        ) : (
+                          <AlertCircle className="h-4 w-4 shrink-0 text-yellow-500" />
+                        )}
                       </div>
                       {tool?.env_type && ENV_BADGE_CONFIG[tool.env_type] && (
                         <span
@@ -973,58 +864,75 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                       )}
                     </div>
                   </div>
-                  {isToolVersionLoading ? (
-                    <Loader2 className="mt-1 h-4 w-4 animate-spin text-muted-foreground" />
-                  ) : tool?.version ? (
-                    isOutdated ? (
-                      <span className="mt-1 shrink-0 rounded-full border border-yellow-500/20 bg-yellow-500/10 px-1.5 py-0.5 text-[10px] text-yellow-600 dark:text-yellow-400">
-                        {t("settings.updateAvailableShort")}
-                      </span>
-                    ) : (
-                      <CheckCircle2 className="mt-1 h-4 w-4 shrink-0 text-green-500" />
-                    )
-                  ) : (
-                    <AlertCircle className="mt-1 h-4 w-4 shrink-0 text-yellow-500" />
-                  )}
+
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-3 sm:justify-end">
+                    <div className="min-w-0">
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {t("settings.currentVersion")}
+                      </div>
+                      <div
+                        className="truncate font-mono text-sm text-foreground"
+                        title={title}
+                      >
+                        {currentVersionLabel}
+                      </div>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {t("settings.latestVersion")}
+                      </div>
+                      <div className="truncate font-mono text-sm text-foreground">
+                        {latestVersionLabel}
+                      </div>
+                    </div>
+                    <div className="flex min-w-[5.5rem] justify-end">
+                      {isToolVersionLoading ? (
+                        <span className="text-xs text-muted-foreground">
+                          {t("common.loading")}
+                        </span>
+                      ) : installedButBroken ? (
+                        <span className="text-xs text-yellow-600 dark:text-yellow-400">
+                          {t("settings.toolCheckEnv")}
+                        </span>
+                      ) : action ? (
+                        <Button
+                          size="sm"
+                          variant={action === "install" ? "outline" : "default"}
+                          className="h-7 gap-1.5 text-xs"
+                          onClick={() =>
+                            handleRunToolAction([toolName], action)
+                          }
+                          disabled={isToolVersionLoading || isAnyBusy}
+                        >
+                          {runningAction ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : action === "install" ? (
+                            <Download className="h-3.5 w-3.5" />
+                          ) : (
+                            <ArrowUpCircle className="h-3.5 w-3.5" />
+                          )}
+                          {action === "install"
+                            ? t("settings.toolInstall")
+                            : t("settings.toolUpdate")}
+                        </Button>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                          <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                          {t("settings.toolReady")}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
-                <div className="space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">
-                      {t("settings.currentVersion")}
-                    </span>
-                    <span
-                      className="min-w-0 truncate font-mono text-foreground"
-                      title={title}
-                    >
-                      {isToolVersionLoading
-                        ? t("common.loading")
-                        : tool?.version
-                          ? tool.version
-                          : installedButBroken
-                            ? t("settings.installedNotRunnable")
-                            : t("common.notInstalled")}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">
-                      {t("settings.latestVersion")}
-                    </span>
-                    <span className="min-w-0 truncate font-mono text-foreground">
-                      {isToolVersionLoading
-                        ? t("common.loading")
-                        : tool?.latest_version || t("common.unknown")}
-                    </span>
-                  </div>
-                  {!isToolVersionLoading && !tool?.version && tool?.error && (
-                    <div className="truncate text-[11px] text-muted-foreground">
-                      {tool.error}
-                    </div>
-                  )}
-                </div>
+                {!isToolVersionLoading && !tool?.version && tool?.error && (
+                  <p className="mt-3 truncate text-[11px] text-muted-foreground">
+                    {tool.error}
+                  </p>
+                )}
 
                 {tool?.env_type === "wsl" && (
-                  <div className="flex flex-wrap gap-2">
+                  <div className="mt-3 flex flex-wrap gap-2">
                     <Select
                       value={wslShellByTool[toolName]?.wslShell || "auto"}
                       onValueChange={(v) => handleToolShellChange(toolName, v)}
@@ -1064,9 +972,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                   </div>
                 )}
 
-                {/* 多处安装冲突诊断结果：仅在懒触发后有数据时渲染。 */}
                 {conflicts && conflicts.length > 0 && (
-                  <div className="space-y-1.5 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-2.5">
+                  <div className="mt-3 space-y-1.5 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-2.5">
                     <div className="text-[11px] font-medium text-yellow-600 dark:text-yellow-400">
                       {t("settings.toolConflictTitle")}
                     </div>
@@ -1082,44 +989,6 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                     </ul>
                   </div>
                 )}
-
-                <div className="mt-auto flex items-center justify-end">
-                  {isToolVersionLoading ? (
-                    <span className="text-xs text-muted-foreground">
-                      {t("common.loading")}
-                    </span>
-                  ) : installedButBroken ? (
-                    // 已安装但跑不起来：重装无济于事，不给按钮，给一句指向环境的提示。
-                    <span className="text-xs text-yellow-600 dark:text-yellow-400">
-                      {t("settings.toolCheckEnv")}
-                    </span>
-                  ) : action ? (
-                    <Button
-                      size="sm"
-                      variant={action === "install" ? "outline" : "default"}
-                      className="h-7 gap-1.5 text-xs"
-                      onClick={() => handleRunToolAction([toolName], action)}
-                      disabled={isToolVersionLoading || isAnyBusy}
-                    >
-                      {runningAction ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : action === "install" ? (
-                        <Download className="h-3.5 w-3.5" />
-                      ) : (
-                        <ArrowUpCircle className="h-3.5 w-3.5" />
-                      )}
-                      {/* loading 时文案保持不变、仅图标切换为 spinner，
-                          按钮宽度恒定，避免"升级"→"升级中…"导致的抖动。 */}
-                      {action === "install"
-                        ? t("settings.toolInstall")
-                        : t("settings.toolUpdate")}
-                    </Button>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">
-                      {t("settings.toolReady")}
-                    </span>
-                  )}
-                </div>
               </motion.div>
             );
           })}

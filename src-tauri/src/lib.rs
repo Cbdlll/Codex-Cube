@@ -449,18 +449,6 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
 
-            // 注册 Updater 插件（桌面端）；放在 logger 之后，确保失败可诊断。
-            #[cfg(desktop)]
-            {
-                if let Err(e) = app
-                    .handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                {
-                    // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
-                    log::warn!("初始化 Updater 插件失败，已跳过：{e}");
-                }
-            }
-
             // 注入 AppHandle 给 usage_events，让无 AppHandle 持有的写日志路径
             // 也能向前端推送 `usage-log-recorded`。
             // 放在日志系统初始化之后，确保 init 的日志能正常输出。
@@ -1114,9 +1102,6 @@ pub fn run() {
             commands::get_log_config,
             commands::set_log_config,
             commands::restart_app,
-            commands::install_update_and_restart,
-            commands::check_app_update_available,
-            commands::check_for_updates,
             commands::is_portable_mode,
             commands::copy_text_to_clipboard,
             // usage query
@@ -1281,7 +1266,7 @@ pub fn run() {
                     api.prevent_exit();
                     return;
                 }
-                // code 为 RESTART_EXIT_CODE：app.restart() / 自更新 relaunch 发起的重启。
+                // code 为 RESTART_EXIT_CODE：app.restart() 发起的重启。
                 // 这条路径上 prevent_exit() 会被 Tauri 忽略，事件循环必定退出，随后由
                 // Tauri 在 RunEvent::Exit 后用新二进制 re-exec（macOS 会按更新后的
                 // Info.plist 解析可执行名）。
@@ -1769,7 +1754,7 @@ enum ExitRequestAction {
     /// `code` 为 `None`：运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活
     /// 窗口），阻止退出、保持托盘后台运行。
     StayInTray,
-    /// `code` 为 `RESTART_EXIT_CODE`：`app.restart()` / 自更新 relaunch 发起的
+    /// `code` 为 `RESTART_EXIT_CODE`：`app.restart()` 发起的
     /// 重启，不拦截、不做自定义清理，交还 Tauri 默认 re-exec 流程。
     DeferToTauriRestart,
     /// 其它 `Some(_)`：用户主动退出（托盘「退出」等），执行完整异步清理后结束进程。

@@ -61,6 +61,8 @@ jobs:
             - Refresh stale thread models after provider URL or API key changes
             - Remove unused MCP, Skills marketplace, WebDAV, and related UI copied from CC Switch
             - Keep Codex `[mcp_servers]` in live `config.toml` when switching providers
+            - Remove in-app update checks; download new app versions from GitHub Releases
+            - Tighten the About page local Codex CLI layout for a single tool
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

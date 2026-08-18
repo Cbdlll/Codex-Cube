@@ -48,7 +48,6 @@ import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
-import { UpdateBadge } from "@/components/UpdateBadge";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
@@ -690,12 +689,6 @@ function App() {
                   <ProfileSwitcher activeApp="codex" />
                 </div>
               )}
-            <UpdateBadge
-              onClick={() => {
-                setSettingsDefaultTab("about");
-                setCurrentView("settings");
-              }}
-            />
             {currentView === "providers" && (
               <Button
                 onClick={() => setIsAddOpen(true)}

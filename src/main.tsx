@@ -2,7 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { DatabaseUpgrade } from "./components/DatabaseUpgrade";
-import { UpdateProvider } from "./contexts/UpdateContext";
 import "./index.css";
 // 导入国际化配置
 import i18n from "./i18n";
@@ -122,10 +121,8 @@ async function bootstrap() {
       <FrontendErrorBoundary>
         <QueryClientProvider client={queryClient}>
           <ThemeProvider defaultTheme="system" storageKey="codex-cube-theme">
-            <UpdateProvider>
-              <App />
-              <Toaster />
-            </UpdateProvider>
+            <App />
+            <Toaster />
           </ThemeProvider>
         </QueryClientProvider>
       </FrontendErrorBoundary>
