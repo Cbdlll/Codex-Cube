@@ -25,6 +25,8 @@ export interface CodexSubagent {
   wireApi: string;
   /** 注册角色类型：worker | explorer | default。 */
   agentType: string;
+  /** 已绑定的 Cube 供应商 ID；未绑定为 null/undefined。 */
+  cubeProviderId?: string | null;
 }
 
 export interface CodexSubagentUpsertPayload {
@@ -41,6 +43,8 @@ export interface CodexSubagentUpsertPayload {
   wireApi?: string;
   /** 注册角色类型：worker | explorer | default；省略时后端默认 worker。 */
   agentType?: string;
+  /** 复用已有 Cube 供应商时传入其真实 providers.id，不要传 agent 名 slug。 */
+  cubeProviderId?: string;
 }
 
 export interface CodexSubagentModelsFetchPayload {

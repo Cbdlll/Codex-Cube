@@ -64,7 +64,6 @@ const isRefreshIntervalOption = (
 const normalizeRefreshInterval = (value: number | undefined) =>
   isRefreshIntervalOption(value) ? value : DEFAULT_REFRESH_INTERVAL_MS;
 
-// 与 AppSwitcher 的 appIconName 保持一致（codex 复用 openai 图标）
 const APP_FILTER_ICON: Record<AppType, string> = {
   codex: "openai",
 };

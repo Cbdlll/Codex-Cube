@@ -4,7 +4,7 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::prompt::Prompt;
+use crate::app_config::Prompt;
 use indexmap::IndexMap;
 use rusqlite::params;
 

@@ -198,8 +198,7 @@ function ProviderFormFull({
   const handleCommonConfigConfirm = async () => {
     try {
       if (settingsData) {
-        const { webdavSync: _, ...rest } = settingsData;
-        await settingsApi.save({ ...rest, commonConfigConfirmed: true });
+        await settingsApi.save({ ...settingsData, commonConfigConfirmed: true });
         await queryClient.invalidateQueries({ queryKey: ["settings"] });
       }
     } catch (error) {

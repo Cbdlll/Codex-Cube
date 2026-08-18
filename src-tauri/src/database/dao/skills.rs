@@ -9,7 +9,7 @@
 use crate::app_config::{InstalledSkill, SkillApps};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::services::skill::SkillRepo;
+use crate::app_config::SkillRepo;
 use indexmap::IndexMap;
 use rusqlite::params;
 
@@ -267,7 +267,7 @@ impl Database {
             return Ok(0);
         }
 
-        let default_store = crate::services::skill::SkillStore::default();
+        let default_store = crate::app_config::SkillStore::default();
         let mut count = 0;
 
         for repo in &default_store.repos {

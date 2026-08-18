@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tauri::{command, State};
 
-use crate::app_config::{AppType, InstalledSkill, SkillApps};
 use crate::codex_agent_workflow;
 use crate::codex_subagents;
 use crate::error::AppError;
-use crate::services::skill::SkillService;
 use crate::store::AppState;
 use std::path::Path;
 
@@ -45,7 +43,7 @@ pub struct CodexAgentWorkflowInstallPayload {
     pub role_agents: codex_agent_workflow::RoleAgents,
 }
 
-fn get_status(app_state: &AppState) -> Result<CodexAgentWorkflowStatus, AppError> {
+fn get_status(_app_state: &AppState) -> Result<CodexAgentWorkflowStatus, AppError> {
     let config_dir = crate::codex_config::get_codex_config_dir();
     let manifest = codex_agent_workflow::load_manifest(&config_dir)?;
     let agents = codex_subagents::list_subagents()?;
@@ -96,13 +94,9 @@ fn get_status(app_state: &AppState) -> Result<CodexAgentWorkflowStatus, AppError
         .unwrap_or_default();
     let skill_id = codex_agent_workflow::WORKFLOW_SKILL_DB_ID.to_string();
     let skill_directory = codex_agent_workflow::WORKFLOW_SKILL_DIRECTORY.to_string();
-    let skill_path = SkillService::get_app_skills_dir(&AppType::Codex)
-        .map_err(|error| AppError::Message(error.to_string()))?
-        .join(codex_agent_workflow::WORKFLOW_SKILL_DIRECTORY)
-        .join("SKILL.md");
+    let skill_path = codex_agent_workflow::workflow_skill_path()?;
     let skill_content = codex_agent_workflow::workflow_skill_content()?;
-    let skill_installed =
-        app_state.db.get_installed_skill(&skill_id)?.is_some() && skill_content.is_some();
+    let skill_installed = skill_content.is_some();
     let managed_agents: Vec<_> = agents
         .iter()
         .filter(|agent| agent.managed && agent.available)
@@ -233,45 +227,24 @@ pub fn install_codex_agent_workflow(
         &worker.name,
         &config_dir,
     ) {
-        // 回滚已写入的 Skill（含 DB 记录），避免半安装状态；AGENTS.md/manifest
+        // 回滚已写入的 Skill 目录，避免半安装状态；AGENTS.md/manifest
         // 由 codex_agent_workflow::install 自身的原子回滚负责恢复。
-        if app_state
-            .db
-            .get_installed_skill(codex_agent_workflow::WORKFLOW_SKILL_DB_ID)
-            .is_ok_and(|skill| skill.is_some())
-        {
-            let _ =
-                SkillService::uninstall(&app_state.db, codex_agent_workflow::WORKFLOW_SKILL_DB_ID);
-        }
+        codex_agent_workflow::uninstall_workflow_skill_files();
         return Err(error.to_string());
     }
     get_status(&app_state).map_err(|error| error.to_string())
 }
 
 pub(crate) fn install_workflow_skill(
-    app_state: &AppState,
+    _app_state: &AppState,
     agents: &[codex_subagents::SubagentRecord],
     role_agents: &codex_agent_workflow::RoleAgents,
     worker_agent: &str,
     config_dir: &Path,
 ) -> Result<(), AppError> {
     let skill_dir = codex_agent_workflow::workflow_skill_dir()?;
-    // 迁移旧名：v1 的 skill 叫 subagent-workflow。先走标准卸载（含备份），
-    // 再兜底清理可能残留的目录，避免 Codex 同时发现新旧两个 skill。
-    let _ = SkillService::uninstall(
-        &app_state.db,
-        codex_agent_workflow::LEGACY_WORKFLOW_SKILL_DB_ID,
-    );
-    let ssot_root =
-        SkillService::get_ssot_dir().map_err(|error| AppError::Message(error.to_string()))?;
-    let _ = std::fs::remove_dir_all(
-        ssot_root.join(codex_agent_workflow::LEGACY_WORKFLOW_SKILL_DIRECTORY),
-    );
-    let app_skills_dir = SkillService::get_app_skills_dir(&AppType::Codex)
-        .map_err(|error| AppError::Message(error.to_string()))?;
-    let _ = std::fs::remove_dir_all(
-        app_skills_dir.join(codex_agent_workflow::LEGACY_WORKFLOW_SKILL_DIRECTORY),
-    );
+    // 迁移旧名：v1 的 skill 叫 subagent-workflow。直接删目录，避免 Codex 同时发现新旧两个 skill。
+    codex_agent_workflow::remove_legacy_workflow_skill_dirs();
     let skill_dir_existed = skill_dir.exists();
     let agents_dir = skill_dir.join("agents");
     let result = (|| -> Result<(), AppError> {
@@ -283,44 +256,18 @@ pub(crate) fn install_workflow_skill(
             &agents_dir.join("openai.yaml"),
             &codex_agent_workflow::workflow_skill_openai_yaml(),
         )?;
-
-        let existing = app_state
-            .db
-            .get_installed_skill(codex_agent_workflow::WORKFLOW_SKILL_DB_ID)?;
-        let (_, description) = codex_agent_workflow::workflow_skill_metadata(&markdown);
-        let installed_skill = InstalledSkill {
-            id: codex_agent_workflow::WORKFLOW_SKILL_DB_ID.to_string(),
-            name: codex_agent_workflow::WORKFLOW_SKILL_DISPLAY_NAME.to_string(),
-            description,
-            directory: codex_agent_workflow::WORKFLOW_SKILL_DIRECTORY.to_string(),
-            repo_owner: None,
-            repo_name: None,
-            repo_branch: None,
-            readme_url: None,
-            apps: existing
-                .as_ref()
-                .map(|skill| skill.apps.clone())
-                .unwrap_or_else(|| SkillApps::only(&AppType::Codex)),
-            installed_at: existing
-                .as_ref()
-                .map(|skill| skill.installed_at)
-                .unwrap_or_else(|| chrono::Utc::now().timestamp()),
-            content_hash: Some(
-                SkillService::compute_dir_hash(&skill_dir)
-                    .map_err(|error| AppError::Message(error.to_string()))?,
-            ),
-            updated_at: chrono::Utc::now().timestamp(),
-        };
-        app_state.db.save_skill(&installed_skill)?;
-        SkillService::sync_to_app_dir(
-            codex_agent_workflow::WORKFLOW_SKILL_DIRECTORY,
-            &AppType::Codex,
-        )
-        .map_err(|error| AppError::Message(error.to_string()))?;
         let selected = role_agents.union();
-        // Codex 的全局 fallback 必须跟随应用当前选定的默认 worker：
-        // default[0] → worker[0] → explorer[0]。旧 payload/manifest 可能没有
-        // role_agents，此时回退到传入的 worker_agent，保持历史安装可刷新。
+        // Routing is resolved at spawn time from the registered agent TOML.
+        // Do not write `[agents].default_subagent_model` — a global fallback
+        // cannot represent per-role models and silently overrides later worker
+        // changes. Restore or strip leftover keys from older Cube installs.
+        if let Err(error) =
+            codex_agent_workflow::restore_or_clear_agent_defaults_for_skill_install(config_dir)
+        {
+            log::warn!(
+                "安装 cube-dispatch skill 时清理 [agents].default_subagent_* 失败，继续安装: {error}"
+            );
+        }
         let default_worker_name = {
             let derived = codex_agent_workflow::derive_worker_agent(role_agents);
             if derived.trim().is_empty() {
@@ -329,23 +276,19 @@ pub(crate) fn install_workflow_skill(
                 derived
             }
         };
-        let default_worker = agents
-            .iter()
-            .find(|agent| agent.name == default_worker_name)
-            .ok_or_else(|| {
-                AppError::Message(format!(
-                    "workflow 默认 worker {} 未在可用 subagent 列表中找到",
-                    default_worker_name
-                ))
-            })?;
-        codex_agent_workflow::install_with_agent_defaults(
+        if !agents.iter().any(|agent| agent.name == default_worker_name) {
+            return Err(AppError::Message(format!(
+                "workflow 默认 worker {} 未在可用 subagent 列表中找到",
+                default_worker_name
+            )));
+        }
+        codex_agent_workflow::install(
             config_dir,
             worker_agent,
             &selected,
             role_agents,
             codex_agent_workflow::WORKFLOW_MODE_SKILL,
-            default_worker.reasoning_effort.as_str(),
-            default_worker.model.as_str(),
+            "high",
         )
     })();
     if let Err(error) = result {
@@ -367,11 +310,7 @@ pub(crate) fn refresh_workflow_skill_if_installed(app_state: &AppState) -> Resul
     if manifest.mode != codex_agent_workflow::WORKFLOW_MODE_SKILL {
         return Ok(());
     }
-    if app_state
-        .db
-        .get_installed_skill(codex_agent_workflow::WORKFLOW_SKILL_DB_ID)?
-        .is_none()
-    {
+    if codex_agent_workflow::workflow_skill_content()?.is_none() {
         return Ok(());
     }
     let agents = codex_subagents::list_subagents()?;
@@ -431,15 +370,7 @@ pub fn cancel_codex_agent_workflow_instructions(
 ) -> Result<CodexAgentWorkflowStatus, String> {
     let config_dir = crate::codex_config::get_codex_config_dir();
     codex_agent_workflow::cancel(&config_dir).map_err(|error| error.to_string())?;
-    if app_state
-        .db
-        .get_installed_skill(codex_agent_workflow::WORKFLOW_SKILL_DB_ID)
-        .map_err(|error| error.to_string())?
-        .is_some()
-    {
-        SkillService::uninstall(&app_state.db, codex_agent_workflow::WORKFLOW_SKILL_DB_ID)
-            .map_err(|error| error.to_string())?;
-    }
+    codex_agent_workflow::uninstall_workflow_skill_files();
     get_status(&app_state).map_err(|error| error.to_string())
 }
 
@@ -447,8 +378,6 @@ pub fn cancel_codex_agent_workflow_instructions(
 mod tests {
     use super::*;
     use crate::database::Database;
-    use crate::services::skill::SkillStorageLocation;
-    use crate::settings;
     use crate::store::AppState;
     use std::sync::Arc;
 
@@ -469,25 +398,11 @@ mod tests {
         }
     }
 
-    struct SkillLocationGuard(SkillStorageLocation);
-    impl Drop for SkillLocationGuard {
-        fn drop(&mut self) {
-            let _ = settings::set_skill_storage_location(self.0);
-        }
-    }
-
-    fn setup() -> (
-        tempfile::TempDir,
-        TestHomeGuard,
-        SkillLocationGuard,
-        AppState,
-    ) {
+    fn setup() -> (tempfile::TempDir, TestHomeGuard, AppState) {
         let home = tempfile::tempdir().unwrap();
         let home_guard = TestHomeGuard::set(home.path());
-        let location_guard = SkillLocationGuard(settings::get_skill_storage_location());
-        settings::set_skill_storage_location(SkillStorageLocation::CodexCube).unwrap();
         let app_state = AppState::new(Arc::new(Database::memory().unwrap()));
-        (home, home_guard, location_guard, app_state)
+        (home, home_guard, app_state)
     }
 
     fn upsert_payload(name: &str, description: &str) -> codex_subagents::SubagentUpsertPayload {
@@ -502,6 +417,7 @@ mod tests {
             reasoning_effort: "xhigh".to_owned(),
             wire_api: Some("responses".to_owned()),
             agent_type: None,
+            cube_provider_id: None,
         }
     }
 
@@ -535,7 +451,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn workflow_skill_install_writes_ssot_and_reports_installed_status() {
-        let (_home, _home_guard, _location_guard, app_state) = setup();
+        let (_home, _home_guard, app_state) = setup();
         let record = register_subagent("deepseek-flash", "适合前端重构");
         let config_dir = crate::codex_config::get_codex_config_dir();
 
@@ -551,20 +467,15 @@ mod tests {
         let skill_path = codex_agent_workflow::workflow_skill_path().unwrap();
         let content = std::fs::read_to_string(&skill_path).unwrap();
         assert!(content.contains("- **worker:**"));
-        assert!(
-            content.contains("  - `deepseek-flash` (model: deepseek-v4-flash, reasoning: xhigh)")
-        );
-        assert!(content.contains("**Default worker:** `deepseek-flash`"));
+        assert!(content.contains("  - `deepseek-flash`"));
+        assert!(!content.contains("model: deepseek-v4-flash"));
+        assert!(!content.contains("**Default worker:** `deepseek-flash`"));
         assert!(codex_agent_workflow::workflow_skill_dir()
             .unwrap()
             .join("agents")
             .join("openai.yaml")
             .exists());
-        assert!(app_state
-            .db
-            .get_installed_skill(codex_agent_workflow::WORKFLOW_SKILL_DB_ID)
-            .unwrap()
-            .is_some());
+        assert!(skill_path.exists());
 
         let status = get_status(&app_state).unwrap();
         assert!(status.installed);
@@ -576,7 +487,7 @@ mod tests {
             .contains(".codex/skills/cube-dispatch/SKILL.md"));
         assert!(status
             .skill_content
-            .is_some_and(|content| content.contains("reasoning: xhigh")));
+            .is_some_and(|content| content.contains("  - `deepseek-flash`")));
         assert_eq!(
             status.role_agents.worker,
             vec!["deepseek-flash".to_string()]
@@ -585,8 +496,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn workflow_skill_install_uses_role_selected_default_for_codex_fallback() {
-        let (_home, _home_guard, _location_guard, app_state) = setup();
+    fn workflow_skill_install_does_not_write_codex_global_subagent_defaults() {
+        let (_home, _home_guard, app_state) = setup();
         let worker = register_subagent_with_reasoning("worker-agent", "xhigh");
         let mut default_payload = upsert_payload("default-agent", "通用默认 worker");
         default_payload.model = "deepseek-v4-pro".to_owned();
@@ -594,14 +505,13 @@ mod tests {
         default_payload.agent_type = Some(codex_subagents::AGENT_TYPE_DEFAULT.to_owned());
         let default_worker = codex_subagents::upsert_subagent(&default_payload).unwrap();
         let config_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::write(config_dir.join("config.toml"), "model = \"gpt-5.6-sol\"\n").unwrap();
         let role_agents = codex_agent_workflow::RoleAgents {
             worker: vec![worker.name.clone()],
             explorer: Vec::new(),
             default: vec![default_worker.name.clone()],
         };
 
-        // worker_agent can be supplied by an older/stale caller. Global fallback must
-        // still follow the app role selection rather than this compatibility field.
         install_workflow_skill(
             &app_state,
             &[worker, default_worker],
@@ -612,46 +522,69 @@ mod tests {
         .unwrap();
 
         let config = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
-        assert!(config.contains("default_subagent_model = \"deepseek-v4-pro\""));
-        assert!(config.contains("default_subagent_reasoning_effort = \"max\""));
+        assert!(!config.contains("default_subagent_model"));
+        assert!(!config.contains("default_subagent_reasoning_effort"));
+        let profile = codex_agent_workflow::resolve_dispatch_profile(&config_dir, Some("worker"))
+            .expect("worker role must resolve from registered TOML");
+        assert_eq!(profile.agent_name, "worker-agent");
+        assert_eq!(profile.model, "deepseek-v4-flash");
+        assert_eq!(profile.reasoning_effort, "xhigh");
+        let default_profile =
+            codex_agent_workflow::resolve_dispatch_profile(&config_dir, Some("default"))
+                .expect("default role must resolve from registered TOML");
+        assert_eq!(default_profile.agent_name, "default-agent");
+        assert_eq!(default_profile.model, "deepseek-v4-pro");
+        assert_eq!(default_profile.reasoning_effort, "max");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn workflow_skill_install_clears_leftover_codex_global_subagent_defaults() {
+        let (_home, _home_guard, app_state) = setup();
+        let worker = register_subagent("worker-agent", "适合修 leftover defaults");
+        let config_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::write(config_dir.join("config.toml"), "model = \"gpt-5.6-sol\"\n").unwrap();
+        codex_agent_workflow::sync_agent_defaults(&config_dir, "deepseek-v4-flash", "max").unwrap();
+        assert!(std::fs::read_to_string(config_dir.join("config.toml"))
+            .unwrap()
+            .contains("default_subagent_model = \"deepseek-v4-flash\""));
+
+        install_workflow_skill(
+            &app_state,
+            &[worker],
+            &worker_role(&["worker-agent"]),
+            "worker-agent",
+            &config_dir,
+        )
+        .unwrap();
+
+        let config = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(!config.contains("default_subagent_model"));
+        assert!(!config.contains("default_subagent_reasoning_effort"));
+        assert!(!codex_agent_workflow::agent_defaults_backup_path(&config_dir).exists());
     }
 
     #[test]
     #[serial_test::serial]
     fn install_workflow_skill_removes_legacy_subagent_workflow() {
-        let (_home, _home_guard, _location_guard, app_state) = setup();
+        let (_home, _home_guard, app_state) = setup();
         let record = register_subagent("deepseek-flash", "适合前端重构");
         let config_dir = crate::codex_config::get_codex_config_dir();
 
-        // 模拟旧版安装：DB 记录 + SSOT/应用目录下的 subagent-workflow。
-        let legacy_id = codex_agent_workflow::LEGACY_WORKFLOW_SKILL_DB_ID.to_string();
+        // 模拟旧版安装：Codex skills 目录 + Cube SSOT 残留的 subagent-workflow。
         let legacy_dir = codex_agent_workflow::LEGACY_WORKFLOW_SKILL_DIRECTORY.to_string();
-        let ssot_root = SkillService::get_ssot_dir().unwrap();
-        let app_root = SkillService::get_app_skills_dir(&AppType::Codex).unwrap();
-        let legacy_ssot = ssot_root.join(&legacy_dir);
+        let app_root = codex_agent_workflow::codex_skills_dir();
+        let leftover_ssot = crate::config::get_app_config_dir()
+            .join("skills")
+            .join(&legacy_dir);
         let legacy_app = app_root.join(&legacy_dir);
-        std::fs::create_dir_all(legacy_ssot.join("agents")).unwrap();
+        std::fs::create_dir_all(leftover_ssot.join("agents")).unwrap();
         std::fs::create_dir_all(&legacy_app).unwrap();
         std::fs::write(
-            legacy_ssot.join("SKILL.md"),
+            leftover_ssot.join("SKILL.md"),
             "---\nname: subagent-workflow\n---\n",
         )
         .unwrap();
-        let legacy = crate::app_config::InstalledSkill {
-            id: legacy_id.clone(),
-            name: "Subagent Workflow".to_string(),
-            description: None,
-            directory: legacy_dir,
-            repo_owner: None,
-            repo_name: None,
-            repo_branch: None,
-            readme_url: None,
-            apps: crate::app_config::SkillApps::only(&AppType::Codex),
-            installed_at: chrono::Utc::now().timestamp(),
-            content_hash: None,
-            updated_at: chrono::Utc::now().timestamp(),
-        };
-        app_state.db.save_skill(&legacy).unwrap();
 
         install_workflow_skill(
             &app_state,
@@ -662,13 +595,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!legacy_ssot.exists());
+        assert!(!leftover_ssot.exists());
         assert!(!legacy_app.exists());
-        assert!(app_state
-            .db
-            .get_installed_skill(&legacy_id)
-            .unwrap()
-            .is_none());
         let status = get_status(&app_state).unwrap();
         assert_eq!(status.skill_id, "local:cube-dispatch");
         assert!(status
@@ -678,8 +606,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn refresh_workflow_skill_regenerates_after_subagent_reasoning_change() {
-        let (_home, _home_guard, _location_guard, app_state) = setup();
+    fn refresh_workflow_skill_picks_up_subagent_reasoning_without_staling_skill() {
+        let (_home, _home_guard, app_state) = setup();
         register_subagent_with_reasoning("deepseek-flash", "xhigh");
         let config_dir = crate::codex_config::get_codex_config_dir();
 
@@ -693,33 +621,25 @@ mod tests {
         .unwrap();
         register_subagent_with_reasoning("deepseek-flash", "max");
 
-        assert!(get_status(&app_state).unwrap().skill_stale);
+        assert!(!get_status(&app_state).unwrap().skill_stale);
 
-        refresh_workflow_skill_if_installed(&app_state).unwrap();
-
-        let status = get_status(&app_state).unwrap();
-        assert!(!status.skill_stale);
-        assert!(status
-            .skill_content
-            .is_some_and(|content| content.contains("reasoning: max")));
-        let config = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
-        assert!(config.contains("default_subagent_model = \"deepseek-v4-flash\""));
-        assert!(config.contains("default_subagent_reasoning_effort = \"max\""));
+        let profile = codex_agent_workflow::resolve_dispatch_profile(&config_dir, Some("worker"))
+            .expect("worker profile");
+        assert_eq!(profile.model, "deepseek-v4-flash");
+        assert_eq!(profile.reasoning_effort, "max");
+        let config = std::fs::read_to_string(config_dir.join("config.toml")).unwrap_or_default();
+        assert!(!config.contains("default_subagent_model"));
+        assert!(!config.contains("default_subagent_reasoning_effort"));
     }
 
     #[test]
     #[serial_test::serial]
     fn refresh_workflow_skill_is_noop_without_manifest() {
-        let (_home, _home_guard, _location_guard, app_state) = setup();
+        let (_home, _home_guard, app_state) = setup();
         register_subagent("deepseek-flash", "适合前端重构");
 
         refresh_workflow_skill_if_installed(&app_state).unwrap();
 
-        assert!(app_state
-            .db
-            .get_installed_skill(codex_agent_workflow::WORKFLOW_SKILL_DB_ID)
-            .unwrap()
-            .is_none());
         assert!(!codex_agent_workflow::workflow_skill_path()
             .unwrap()
             .exists());

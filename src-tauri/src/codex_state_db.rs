@@ -103,7 +103,7 @@ pub(crate) fn should_sync_codex_thread_models(provider: &Provider) -> bool {
 }
 
 /// Rewrite stale `custom` thread models to the provider's upstream model after
-/// a successful Codex provider switch.
+/// a successful Codex provider switch or in-place save of the current provider.
 ///
 /// Scope (mirrors the proxy's active-session fallback):
 /// - Only threads with `model_provider = 'custom'` are touched; `openai` and
@@ -144,6 +144,36 @@ pub(crate) fn sync_stale_custom_thread_models(
         }
     }
     outcome
+}
+
+/// Same as [`sync_stale_custom_thread_models`], reading the live Codex home and
+/// `config.toml` so callers after a live write do not have to thread those paths.
+pub(crate) fn sync_stale_custom_thread_models_from_live(
+    provider: &Provider,
+) -> CodexThreadModelSyncOutcome {
+    sync_stale_custom_thread_models(
+        provider,
+        &crate::codex_config::get_codex_config_dir(),
+        &crate::codex_config::read_codex_config_text().unwrap_or_default(),
+    )
+}
+
+/// Live/import/add paths share this so a successful live write cannot leave
+/// `custom` threads pointing at the previous provider's model.
+pub(crate) fn sync_and_log_stale_custom_thread_models_from_live(
+    provider: &Provider,
+    context: &str,
+) {
+    let outcome = sync_stale_custom_thread_models_from_live(provider);
+    if outcome.updated_rows > 0 {
+        log::info!("{context}已同步 {} 条 Codex 线程模型", outcome.updated_rows);
+    }
+    if !outcome.errors.is_empty() {
+        log::warn!(
+            "{context}同步 Codex 线程模型失败: {}",
+            outcome.errors.join("; ")
+        );
+    }
 }
 
 /// Model ids the provider's `modelCatalog` explicitly supports. Empty when the

@@ -1,14 +1,7 @@
 //! 项目 Profile 编排服务
 //!
-//! Profile 是**全应用共享的项目实体**（用户拥有的项目就那几个），payload
-//! 按 app 分槽存配置快照（供应商 / MCP / Skills / Prompt）。快照与应用
-//! 均**按分组（scope）操作**：Codex 独立指向自己的当前项目、只拍/只应用组内
-//! 槽位；重命名/删除作用于共享实体本身。
-//! 应用（apply）时复用现有切换原语批量落地：
-//! - 供应商：`ProviderService::switch`（内建代理接管热切换与接管下禁切官方）
-//! - MCP：`McpService::toggle_app`（改标志 + 单 server 物化）
-//! - Skills：`SkillService::toggle_app`（改标志 + 单 skill 物化）
-//! - Prompt：`PromptService::enable_prompt`（互斥激活 + 原子写 live）
+//! Profile 是**全应用共享的项目实体**。payload 按 app 分槽存供应商快照。
+//! 应用（apply）时复用 `ProviderService::switch`。
 //!
 //! apply 为 best-effort：单项失败收集为 warning 继续，不整体回滚。
 
@@ -19,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::app_config::AppType;
 use crate::database::Profile;
 use crate::error::AppError;
-use crate::services::{McpService, PromptService, ProviderService, SkillService};
+use crate::services::ProviderService;
 use crate::store::AppState;
 
 /// Profile 操作的应用分组：项目实体全应用共享，但快照/应用/当前指针按组进行。
@@ -169,38 +162,10 @@ impl ProfileService {
         scope: ProfileScope,
     ) -> Result<ProfilePayload, AppError> {
         let mut payload = ProfilePayload::default();
-        let mcp_servers = state.db.get_all_mcp_servers()?;
-        let skills = state.db.get_all_installed_skills()?;
 
         for app in scope.apps().iter() {
             if let Some(slot) = payload.providers.get_mut(app) {
                 *slot = crate::settings::get_effective_current_provider(&state.db, app)?;
-            }
-            if let Some(slot) = payload.mcp.get_mut(app) {
-                *slot = Some(
-                    mcp_servers
-                        .values()
-                        .filter(|s| s.apps.is_enabled_for(app))
-                        .map(|s| s.id.clone())
-                        .collect(),
-                );
-            }
-            if let Some(slot) = payload.skills.get_mut(app) {
-                *slot = Some(
-                    skills
-                        .values()
-                        .filter(|s| s.apps.is_enabled_for(app))
-                        .map(|s| s.id.clone())
-                        .collect(),
-                );
-            }
-            if let Some(slot) = payload.prompts.get_mut(app) {
-                *slot = state
-                    .db
-                    .get_prompts(app.as_str())?
-                    .values()
-                    .find(|p| p.enabled)
-                    .map(|p| p.id.clone());
             }
         }
         Ok(payload)
@@ -356,68 +321,6 @@ impl ProfileService {
                             Err(e) => warnings.push(format!(
                                 "[{app_str}] switch provider '{target_pid}' failed: {e}"
                             )),
-                        }
-                    }
-                }
-            }
-
-            // 3. MCP diff（最小 toggle：仅动目标态≠当前态的条目；None = 该侧未拍过，不动）
-            if let Some(Some(target_ids)) = payload.mcp.get(app) {
-                let servers = state.db.get_all_mcp_servers()?;
-                let current: Vec<(String, bool)> = servers
-                    .values()
-                    .map(|s| (s.id.clone(), s.apps.is_enabled_for(app)))
-                    .collect();
-                let (toggles, dangling) = plan_toggles(&current, target_ids);
-                for id in dangling {
-                    warnings.push(format!("[{app_str}] MCP '{id}' no longer exists, skipped"));
-                }
-                for (id, enabled) in toggles {
-                    if let Err(e) = McpService::toggle_app(state, &id, app.clone(), enabled) {
-                        warnings.push(format!(
-                            "[{app_str}] toggle MCP '{id}' -> {enabled} failed: {e}"
-                        ));
-                    }
-                }
-            }
-
-            // 4. Skills diff（SkillService 返回 anyhow::Result，收进 warning）
-            if let Some(Some(target_ids)) = payload.skills.get(app) {
-                let skills = state.db.get_all_installed_skills()?;
-                let current: Vec<(String, bool)> = skills
-                    .values()
-                    .map(|s| (s.id.clone(), s.apps.is_enabled_for(app)))
-                    .collect();
-                let (toggles, dangling) = plan_toggles(&current, target_ids);
-                for id in dangling {
-                    warnings.push(format!(
-                        "[{app_str}] skill '{id}' no longer exists, skipped"
-                    ));
-                }
-                for (id, enabled) in toggles {
-                    if let Err(e) = SkillService::toggle_app(&state.db, &id, app, enabled) {
-                        warnings.push(format!(
-                            "[{app_str}] toggle skill '{id}' -> {enabled} failed: {e}"
-                        ));
-                    }
-                }
-            }
-
-            // 5. Prompt（None = 不动；已激活则幂等跳过，避免无谓的文件写与备份）
-            if let Some(Some(target_prompt)) = payload.prompts.get(app) {
-                let prompts = state.db.get_prompts(app_str)?;
-                match prompts.get(target_prompt) {
-                    None => warnings.push(format!(
-                        "[{app_str}] prompt '{target_prompt}' no longer exists, skipped"
-                    )),
-                    Some(p) if p.enabled => {}
-                    Some(_) => {
-                        if let Err(e) =
-                            PromptService::enable_prompt(state, app.clone(), target_prompt)
-                        {
-                            warnings.push(format!(
-                                "[{app_str}] enable prompt '{target_prompt}' failed: {e}"
-                            ));
                         }
                     }
                 }

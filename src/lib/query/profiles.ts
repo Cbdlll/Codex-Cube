@@ -121,8 +121,6 @@ export const useApplyProfileMutation = () => {
     onSuccess: async (warnings) => {
       await queryClient.invalidateQueries({ queryKey: ["profiles"] });
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
-      await queryClient.invalidateQueries({ queryKey: ["mcp", "all"] });
-      await queryClient.invalidateQueries({ queryKey: ["skills"] });
       await updateTrayMenuSafely();
 
       if (warnings.length > 0) {

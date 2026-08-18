@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-tauri:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+          - platform: windows-latest
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.3
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: __VERSION__
+          releaseName: __VERSION__
+          releaseBody: |
+            1.0.1
+
+            - Fix cube-dispatch spawn routing so registered workers use their bound provider and model
+            - Refresh stale thread models after provider URL or API key changes
+            - Remove unused MCP, Skills marketplace, WebDAV, and related UI copied from CC Switch
+            - Keep Codex `[mcp_servers]` in live `config.toml` when switching providers
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

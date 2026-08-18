@@ -1,14 +1,5 @@
 // 供应商配置处理工具函数
 
-/**
- * 模板变量配置（预设配置中的 ${var} 占位符）。
- */
-export interface TemplateValueConfig {
-  label: string;
-  placeholder: string;
-  defaultValue?: string;
-  editorValue: string;
-}
 import type { CodexApiFormat } from "@/types";
 import { deepClone } from "@/utils/deepClone";
 import { normalizeTomlText } from "@/utils/textNormalization";
@@ -250,51 +241,6 @@ export const getApiKeyFromConfig = (
   } catch (err) {
     return "";
   }
-};
-
-// 模板变量替换
-export const applyTemplateValues = (
-  config: any,
-  templateValues: Record<string, TemplateValueConfig> | undefined,
-): any => {
-  const resolvedValues = Object.fromEntries(
-    Object.entries(templateValues ?? {}).map(([key, value]) => {
-      const resolvedValue =
-        value.editorValue !== undefined
-          ? value.editorValue
-          : (value.defaultValue ?? "");
-      return [key, resolvedValue];
-    }),
-  );
-
-  const replaceInString = (str: string): string => {
-    return Object.entries(resolvedValues).reduce((acc, [key, value]) => {
-      const placeholder = `\${${key}}`;
-      if (!acc.includes(placeholder)) {
-        return acc;
-      }
-      return acc.split(placeholder).join(value ?? "");
-    }, str);
-  };
-
-  const traverse = (obj: any): any => {
-    if (typeof obj === "string") {
-      return replaceInString(obj);
-    }
-    if (Array.isArray(obj)) {
-      return obj.map(traverse);
-    }
-    if (obj && typeof obj === "object") {
-      const result: any = {};
-      for (const [key, value] of Object.entries(obj)) {
-        result[key] = traverse(value);
-      }
-      return result;
-    }
-    return obj;
-  };
-
-  return traverse(config);
 };
 
 // 判断配置中是否存在 API Key 字段

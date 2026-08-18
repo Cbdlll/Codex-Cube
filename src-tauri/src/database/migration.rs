@@ -153,7 +153,7 @@ impl Database {
     ) -> Result<(), AppError> {
         let migrate_app_prompts = |prompts_map: &std::collections::HashMap<
             String,
-            crate::prompt::Prompt,
+            crate::app_config::Prompt,
         >,
                                    app_type: &str|
          -> Result<(), AppError> {

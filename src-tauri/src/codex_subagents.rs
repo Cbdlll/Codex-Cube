@@ -105,6 +105,13 @@ pub struct ManagedSubagent {
     /// 注册角色类型：worker | explorer | default；旧记录为空串，读取时回退 worker。
     #[serde(default)]
     pub agent_type: String,
+    /// Cube SQLite 供应商 ID。manifest `providerId` 只是 key 文件命名空间，
+    /// 不能当作 `providers.id` 去查库；派发路由必须用这个字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cube_provider_id: Option<String>,
+    /// 该 Cube 供应商是否由注册 subagent 时创建（删除 subagent 时可一并删）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cube_provider_owned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +132,8 @@ pub struct SubagentRecord {
     pub wire_api: String,
     /// 注册角色类型（已解析，worker/explorer/default）。
     pub agent_type: String,
+    /// 已绑定的 Cube 供应商 ID；未绑定或已失效时为 None。
+    pub cube_provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -145,6 +154,10 @@ pub struct SubagentUpsertPayload {
     /// 注册角色类型：worker | explorer | default；未提供时按旧行为默认 worker。
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// UI 复用已有 Cube 供应商时传入其真实 `providers.id`。
+    /// 不要把 agent 名推导出的 slug 写到这里。
+    #[serde(default)]
+    pub cube_provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,7 +203,7 @@ fn agent_dir_in(config_dir: &Path) -> PathBuf {
     config_dir.join(SUBAGENT_AGENT_DIRNAME)
 }
 
-fn manifest_file_in(config_dir: &Path) -> Result<SubagentManifest, AppError> {
+pub(crate) fn manifest_file_in(config_dir: &Path) -> Result<SubagentManifest, AppError> {
     let path = manifest_path_in(config_dir);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -217,7 +230,10 @@ pub fn save_manifest(manifest: &SubagentManifest) -> Result<(), AppError> {
     save_manifest_in(&config_dir(), manifest)
 }
 
-fn save_manifest_in(config_dir: &Path, manifest: &SubagentManifest) -> Result<(), AppError> {
+pub(crate) fn save_manifest_in(
+    config_dir: &Path,
+    manifest: &SubagentManifest,
+) -> Result<(), AppError> {
     // 测试故障注入：目录中存在标记文件时模拟 manifest 写入失败（仅测试构建生效）。
     #[cfg(test)]
     if config_dir.join(".fail-manifest-write").exists() {
@@ -232,7 +248,7 @@ fn save_manifest_in(config_dir: &Path, manifest: &SubagentManifest) -> Result<()
 /// 以私密权限原子写入文件：Unix 下临时文件用 0600 模式创建（同目录），
 /// 写入并 flush/sync 后原子 rename，避免“先默认权限创建再 chmod”的暴露窗口。
 /// Windows 下与 config::atomic_write 行为一致（ReplaceFileW + rename 回退）。
-fn write_private_file_atomic(path: &Path, data: &[u8]) -> Result<(), AppError> {
+pub(crate) fn write_private_file_atomic(path: &Path, data: &[u8]) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| AppError::io(parent, error))?;
     }
@@ -524,6 +540,13 @@ fn suffixed_identity(base: &str, suffix: &str, counter: u32) -> String {
     format!("{base}-{suffix}")
 }
 
+fn normalized_cube_provider_id(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
 fn agent_path(name: &str) -> PathBuf {
     agent_path_in(&config_dir(), name)
 }
@@ -532,11 +555,11 @@ fn provider_key_path(provider_id: &str) -> PathBuf {
     provider_key_path_in(&config_dir(), provider_id)
 }
 
-fn agent_path_in(config_dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn agent_path_in(config_dir: &Path, name: &str) -> PathBuf {
     agent_dir_in(config_dir).join(format!("{}.toml", name.trim()))
 }
 
-fn provider_key_path_in(config_dir: &Path, provider_id: &str) -> PathBuf {
+pub(crate) fn provider_key_path_in(config_dir: &Path, provider_id: &str) -> PathBuf {
     key_dir_in(config_dir).join(format!("{}.key", provider_id.trim()))
 }
 
@@ -589,6 +612,7 @@ mod embedded_agent_tests {
             reasoning_effort: "high".to_owned(),
             wire_api: None,
             agent_type: None,
+            cube_provider_id: None,
         }
     }
 
@@ -940,6 +964,10 @@ fn list_subagents_in(
                 .to_owned(),
             wire_api,
             agent_type,
+            cube_provider_id: manifest_record
+                .and_then(|record| record.cube_provider_id.clone())
+                .map(|id| id.trim().to_owned())
+                .filter(|id| !id.is_empty()),
         });
     }
     records.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1101,6 +1129,8 @@ fn upsert_subagent_in(
         original_key: original_key.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
         agent_type: agent_type.clone(),
+        cube_provider_id: normalized_cube_provider_id(payload.cube_provider_id.as_deref()),
+        cube_provider_owned: false,
     });
     if let Some(record) = read_manifest_record_mut(&mut manifest, &payload.name) {
         if !record.provider_managed && provider_managed {
@@ -1112,6 +1142,11 @@ fn upsert_subagent_in(
             .map(|path| path.to_string_lossy().into_owned());
         record.provider_managed = provider_managed;
         record.agent_type = agent_type.clone();
+        if let Some(cube_provider_id) =
+            normalized_cube_provider_id(payload.cube_provider_id.as_deref())
+        {
+            record.cube_provider_id = Some(cube_provider_id);
+        }
     } else {
         manifest.agents.push(original_record);
     }
@@ -1318,6 +1353,7 @@ mod tests {
             reasoning_effort: reasoning_effort.to_owned(),
             wire_api: None,
             agent_type: None,
+            cube_provider_id: None,
         }
     }
 
@@ -2575,6 +2611,7 @@ mod custom_provider_tests {
             reasoning_effort: "high".to_owned(),
             wire_api: Some("responses".to_owned()),
             agent_type: None,
+            cube_provider_id: None,
         }
     }
 

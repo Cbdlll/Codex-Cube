@@ -211,12 +211,6 @@ export interface ProviderMeta {
   githubAccountId?: string;
 }
 
-// Skill 同步方式
-export type SkillSyncMethod = "auto" | "symlink" | "copy";
-
-// Skill 存储位置
-export type SkillStorageLocation = "codex_cube" | "unified";
-
 // Codex API 格式类型
 // - "openai_responses": OpenAI Responses API 格式，直接透传
 // - "openai_chat": OpenAI Chat Completions 格式，需要本地路由转换
@@ -264,58 +258,6 @@ export interface VisibleApps {
   codex: boolean;
 }
 
-// WebDAV 同步状态
-export interface WebDavSyncStatus {
-  lastSyncAt?: number | null;
-  lastError?: string | null;
-  lastErrorSource?: string | null;
-  lastRemoteEtag?: string | null;
-  lastLocalManifestHash?: string | null;
-  lastRemoteManifestHash?: string | null;
-}
-
-// WebDAV 同步配置
-export interface WebDavSyncSettings {
-  enabled?: boolean;
-  autoSync?: boolean;
-  baseUrl?: string;
-  username?: string;
-  password?: string;
-  remoteRoot?: string;
-  profile?: string;
-  status?: WebDavSyncStatus;
-}
-
-// S3 同步配置
-export interface S3SyncSettings {
-  enabled?: boolean;
-  autoSync?: boolean;
-  region?: string;
-  bucket?: string;
-  accessKeyId?: string;
-  secretAccessKey?: string;
-  endpoint?: string;
-  remoteRoot?: string;
-  profile?: string;
-  status?: WebDavSyncStatus;
-}
-
-export type RemoteSnapshotLayout = "current" | "legacy";
-
-// 远端快照信息（下载前预览）
-export interface RemoteSnapshotInfo {
-  deviceName: string;
-  createdAt: string;
-  snapshotId: string;
-  version: number;
-  protocolVersion: number;
-  dbCompatVersion?: number | null;
-  compatible: boolean;
-  artifacts: string[];
-  layout: RemoteSnapshotLayout;
-  remotePath: string;
-}
-
 // 应用设置类型（用于设置对话框与 Tauri API）
 // 存储在本地 ~/.codex-cube/settings.json，不随数据库同步
 export interface Settings {
@@ -350,8 +292,6 @@ export interface Settings {
   failoverConfirmed?: boolean;
   // User has confirmed the first-run welcome notice
   firstRunNoticeConfirmed?: boolean;
-  // User has confirmed the auto-sync traffic warning
-  autoSyncConfirmed?: boolean;
   // User has confirmed the common config first-run notice
   commonConfigConfirmed?: boolean;
   // 首选语言（可选，默认中文）
@@ -367,18 +307,6 @@ export interface Settings {
   // ===== 当前供应商 ID（设备级）=====
   // 当前 Codex 供应商 ID（优先于数据库 is_current）
   currentProviderCodex?: string;
-
-  // ===== Skill 同步设置 =====
-  // Skill 同步方式：auto（默认，优先 symlink）、symlink、copy
-  skillSyncMethod?: SkillSyncMethod;
-  // Skill 存储位置：codex_cube（默认）或 unified（~/.agents/skills/）
-  skillStorageLocation?: SkillStorageLocation;
-
-  // ===== WebDAV v2 同步设置 =====
-  webdavSync?: WebDavSyncSettings;
-
-  // ===== S3 同步设置 =====
-  s3Sync?: S3SyncSettings;
 
   // ===== 备份策略设置 =====
   // Auto-backup interval in hours (0=disabled, default 24)
@@ -404,78 +332,3 @@ export interface Settings {
     };
   };
 }
-
-export interface SessionMeta {
-  providerId: string;
-  sessionId: string;
-  title?: string;
-  summary?: string;
-  projectDir?: string | null;
-  createdAt?: number;
-  lastActiveAt?: number;
-  sourcePath?: string;
-  resumeCommand?: string;
-}
-
-export interface SessionMessage {
-  role: string;
-  content: string;
-  ts?: number;
-}
-
-// MCP 服务器连接参数（宽松：允许扩展字段）
-export interface McpServerSpec {
-  // 可选：社区常见 .mcp.json 中 stdio 配置可不写 type
-  type?: "stdio" | "http" | "sse";
-  // stdio 字段
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  cwd?: string;
-  // http 和 sse 字段
-  url?: string;
-  headers?: Record<string, string>;
-  // 通用字段
-  [key: string]: any;
-}
-
-// v3.7.0: MCP 服务器应用启用状态
-export interface McpApps {
-  codex: boolean;
-}
-
-// MCP 服务器条目（v3.7.0 统一结构）
-export interface McpServer {
-  id: string;
-  name: string;
-  server: McpServerSpec;
-  apps: McpApps; // v3.7.0: 标记应用到哪些客户端
-  description?: string;
-  tags?: string[];
-  homepage?: string;
-  docs?: string;
-  // 兼容旧字段（v3.6.x 及以前）
-  enabled?: boolean; // 已废弃，v3.7.0 使用 apps 字段
-  source?: string;
-  [key: string]: any;
-}
-
-// MCP 服务器映射（id -> McpServer）
-export type McpServersMap = Record<string, McpServer>;
-
-// MCP 配置状态
-export interface McpStatus {
-  userConfigPath: string;
-  userConfigExists: boolean;
-  serverCount: number;
-}
-
-// 新：来自 config.json 的 MCP 列表响应
-export interface McpConfigResponse {
-  configPath: string;
-  servers: Record<string, McpServer>;
-}
-
-// ============================================================================
-
-// ============================================================================

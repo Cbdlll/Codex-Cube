@@ -42,6 +42,42 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
     "user",
 ];
 
+fn is_openai_o_series(model: &str) -> bool {
+    model.len() > 1
+        && model.starts_with('o')
+        && model.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
+}
+
+fn supports_reasoning_effort(model: &str) -> bool {
+    let normalized = model.to_lowercase();
+    is_openai_o_series(&normalized)
+        || normalized
+            .strip_prefix("gpt-")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c.is_ascii_digit() && c >= '5')
+        || normalized == "grok-4.5"
+        || normalized.starts_with("grok-4.5-")
+        || normalized.starts_with("grok-build-")
+}
+
+fn inject_openai_stream_include_usage(result: &mut Value) {
+    let is_stream = result
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_stream {
+        return;
+    }
+    match result.get_mut("stream_options") {
+        Some(Value::Object(opts)) => {
+            opts.insert("include_usage".to_string(), json!(true));
+        }
+        _ => {
+            result["stream_options"] = json!({ "include_usage": true });
+        }
+    }
+}
+
 const TOOL_SEARCH_PROXY_NAME: &str = "tool_search";
 const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
@@ -302,7 +338,7 @@ pub fn responses_to_chat_completions_with_reasoning(
 
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(max_tokens) = body.get("max_output_tokens") {
-        if super::transform::is_openai_o_series(model) {
+        if is_openai_o_series(model) {
             result["max_completion_tokens"] = max_tokens.clone();
         } else {
             result["max_tokens"] = max_tokens.clone();
@@ -356,7 +392,7 @@ pub fn responses_to_chat_completions_with_reasoning(
     // 自身不带 stream_options，缺这一注入会导致 kimi/MiniMax 等第三方流式请求的
     // token/成本/缓存命中率全部漏记（input/output/cache 全为 0）。
     // 与 Claude→openai_chat 路径共用同一 helper，保证两个客户端方向一致。
-    super::transform::inject_openai_stream_include_usage(&mut result);
+    inject_openai_stream_include_usage(&mut result);
 
     Ok(result)
 }
@@ -368,7 +404,7 @@ fn apply_reasoning_options(
     config: Option<&CodexChatReasoningConfig>,
 ) {
     let Some(config) = config else {
-        if super::transform::supports_reasoning_effort(model) {
+        if supports_reasoning_effort(model) {
             if let Some(effort) = body.pointer("/reasoning/effort") {
                 result["reasoning_effort"] = effort.clone();
             }

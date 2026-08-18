@@ -260,6 +260,7 @@ pub fn write_codex_live_atomic(
         &current_config,
         &cfg_text,
     )?;
+    let cfg_text = preserve_codex_mcp_servers_for_live_write(&current_config, &cfg_text)?;
     if !cfg_text.trim().is_empty() {
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
@@ -340,6 +341,7 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
         &current_config,
         &cfg_text,
     )?;
+    let cfg_text = preserve_codex_mcp_servers_for_live_write(&current_config, &cfg_text)?;
 
     if !cfg_text.trim().is_empty() {
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
@@ -2324,13 +2326,48 @@ pub fn strip_codex_unified_session_bucket_from_settings(
     Ok(())
 }
 
+/// Keep Codex `[mcp_servers]` when rewriting live `config.toml`.
+///
+/// Cube no longer manages MCP: the live file is the source of truth. Provider
+/// snapshots must not wipe servers the user configured in Codex.
+pub fn preserve_codex_mcp_servers_for_live_write(
+    current_config: &str,
+    next_config: &str,
+) -> Result<String, AppError> {
+    if current_config.trim().is_empty() || !current_config.contains("mcp") {
+        return Ok(next_config.to_string());
+    }
+    let Ok(current_doc) = current_config.parse::<DocumentMut>() else {
+        return Ok(next_config.to_string());
+    };
+    let existing_mcp_servers = current_doc.get("mcp_servers").cloned();
+    let existing_legacy_mcp = current_doc.get("mcp").cloned();
+    if existing_mcp_servers.is_none() && existing_legacy_mcp.is_none() {
+        return Ok(next_config.to_string());
+    }
+
+    let mut next_doc = if next_config.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        next_config
+            .parse::<DocumentMut>()
+            .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?
+    };
+    if let Some(mcp_servers) = existing_mcp_servers {
+        next_doc["mcp_servers"] = mcp_servers;
+    }
+    if let Some(mcp) = existing_legacy_mcp {
+        next_doc["mcp"] = mcp;
+    }
+    Ok(next_doc.to_string())
+}
+
 /// Backfill helper: strip `[mcp_servers]` from a live `{ auth, config }`
 /// settings object before it is stored back to the DB.
 ///
-/// MCP 服务器的 SSOT 是 DB 的 mcp_servers 表，live `config.toml` 里的
-/// `[mcp_servers]` 只是每次写 live 之后由 MCP 同步重新投影的产物。若回填时
-/// 烙进供应商存储配置，已在应用里删除的服务器会随下次激活该供应商被写回
-/// live，而逐条 reconcile 只认识 DB 现存条目、永远清不掉这种孤儿。
+/// `[mcp_servers]` belongs to Codex live `config.toml`, not to Cube provider
+/// snapshots. If a switch-away backfill copied it into a provider, the next
+/// activation of that provider would restore deleted servers.
 pub fn strip_codex_mcp_servers_from_settings(settings: &mut Value) -> Result<(), AppError> {
     let Some(config_text) = settings
         .get("config")
@@ -2467,6 +2504,7 @@ pub fn restore_codex_settings_for_backfill(
     if restore_provider_token {
         restore_codex_provider_token_for_backfill(settings, template_settings)?;
     }
+    strip_codex_mcp_servers_from_settings(settings)?;
     Ok(())
 }
 
@@ -3415,10 +3453,6 @@ pub fn extract_base_url(config_toml: &str) -> Option<String> {
     Some(extract_model_config(config_toml)?.base_url)
 }
 
-pub fn extract_inline_api_key(config_toml: &str) -> Option<String> {
-    extract_model_config(config_toml)?.api_key
-}
-
 fn optional_non_empty_string(table: &toml::value::Table, key: &str) -> Option<String> {
     table
         .get(key)
@@ -3717,6 +3751,47 @@ requires_openai_auth = true
             Some(original),
             "config text must be byte-identical when nothing is stripped"
         );
+    }
+
+    #[test]
+    fn preserve_mcp_servers_for_live_write_keeps_live_servers() {
+        let current = r#"model = "gpt-5.5"
+
+[mcp_servers.echo]
+type = "stdio"
+command = "echo"
+
+[mcp.servers.legacy]
+command = "noop"
+"#;
+        let next = "model = \"gpt-5.4\"\n";
+        let preserved = preserve_codex_mcp_servers_for_live_write(current, next).expect("preserve");
+        let parsed: toml::Value = toml::from_str(&preserved).unwrap();
+        assert_eq!(
+            parsed.get("model").and_then(|v| v.as_str()),
+            Some("gpt-5.4")
+        );
+        assert!(parsed.get("mcp_servers").and_then(|v| v.get("echo")).is_some());
+        assert!(parsed
+            .get("mcp")
+            .and_then(|v| v.get("servers"))
+            .and_then(|v| v.get("legacy"))
+            .is_some());
+    }
+
+    #[test]
+    fn restore_codex_settings_for_backfill_strips_mcp_servers() {
+        let mut live_settings = json!({
+            "auth": {},
+            "config": "model = \"gpt-5.5\"\n\n[mcp_servers.echo]\ncommand = \"echo\"\n",
+        });
+        restore_codex_settings_for_backfill(&mut live_settings, &json!({}), false).unwrap();
+        let config = live_settings
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(!config.contains("mcp_servers"), "got: {config}");
+        assert!(config.contains("model = \"gpt-5.5\""));
     }
 
     #[test]

@@ -3,17 +3,11 @@
 //! This module implements the codexcube:// protocol (with ccswitch:// as a
 //! compatibility alias for relay-station one-click import links).
 //! via deep links. Supports importing:
-//! - Provider configurations (Claude/Codex/Gemini)
-//! - MCP server configurations
-//! - Prompts
-//! - Skills
+//! - Provider configurations
 //!
 
-mod mcp;
 mod parser;
-mod prompt;
 mod provider;
-mod skill;
 mod utils;
 
 #[cfg(test)]
@@ -22,11 +16,8 @@ mod tests;
 use serde::{Deserialize, Serialize};
 
 // Re-export public API
-pub use mcp::import_mcp_from_deeplink;
 pub use parser::parse_deeplink_url;
-pub use prompt::import_prompt_from_deeplink;
 pub use provider::{import_provider_from_deeplink, parse_and_merge_config};
-pub use skill::import_skill_from_deeplink;
 
 /// Deep link import request model
 ///
@@ -37,7 +28,7 @@ pub use skill::import_skill_from_deeplink;
 pub struct DeepLinkImportRequest {
     /// Protocol version (e.g., "v1")
     pub version: String,
-    /// Resource type to import: "provider" | "prompt" | "mcp" | "skill"
+    /// Resource type to import: "provider"
     pub resource: String,
 
     // ============ Common fields ============

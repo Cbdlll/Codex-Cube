@@ -56,7 +56,6 @@ interface ProfileSwitcherProps {
  *
  * 项目列表共享（用户拥有的项目就那几个），但切换按分组进行：
  * Codex 组指向自己的当前项目、只应用组内快照。
- * 与右侧 AppSwitcher（仅切换查看的应用）语义不同。
  */
 export function ProfileSwitcher({ activeApp }: ProfileSwitcherProps) {
   const { t } = useTranslation();

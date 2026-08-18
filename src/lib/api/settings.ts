@@ -1,10 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type {
-  Settings,
-  WebDavSyncSettings,
-  S3SyncSettings,
-  RemoteSnapshotInfo,
-} from "@/types";
+import type { Settings } from "@/types";
 import type { AppId } from "./types";
 
 export interface ConfigTransferResult {
@@ -14,20 +9,11 @@ export interface ConfigTransferResult {
   backupId?: string;
 }
 
-export interface WebDavTestResult {
-  success: boolean;
-  message?: string;
-}
-
 export interface CodexUnifyHistoryRestoreResult {
   restoredJsonlFiles: number;
   restoredStateRows: number;
   /** 还原被跳过的原因（如当前目录没有账本）；存在时不应报成功 */
   skippedReason?: string;
-}
-
-export interface WebDavSyncResult {
-  status: string;
 }
 
 export const settingsApi = {
@@ -120,76 +106,6 @@ export const settingsApi = {
 
   async importConfigFromFile(filePath: string): Promise<ConfigTransferResult> {
     return await invoke("import_config_from_file", { filePath });
-  },
-
-  // ─── WebDAV sync ──────────────────────────────────────────
-
-  async webdavTestConnection(
-    settings: WebDavSyncSettings,
-    preserveEmptyPassword = true,
-  ): Promise<WebDavTestResult> {
-    return await invoke("webdav_test_connection", {
-      settings,
-      preserveEmptyPassword,
-    });
-  },
-
-  async webdavSyncUpload(): Promise<WebDavSyncResult> {
-    return await invoke("webdav_sync_upload");
-  },
-
-  async webdavSyncDownload(): Promise<WebDavSyncResult> {
-    return await invoke("webdav_sync_download");
-  },
-
-  async webdavSyncSaveSettings(
-    settings: WebDavSyncSettings,
-    passwordTouched = false,
-  ): Promise<{ success: boolean }> {
-    return await invoke("webdav_sync_save_settings", {
-      settings,
-      passwordTouched,
-    });
-  },
-
-  async webdavSyncFetchRemoteInfo(): Promise<
-    RemoteSnapshotInfo | { empty: true }
-  > {
-    return await invoke("webdav_sync_fetch_remote_info");
-  },
-
-  // ===== S3 Sync API =====
-
-  async s3TestConnection(
-    settings: S3SyncSettings,
-    preserveEmptyPassword = true,
-  ): Promise<WebDavTestResult> {
-    return await invoke("s3_test_connection", {
-      settings,
-      preserveEmptyPassword,
-    });
-  },
-
-  async s3SyncUpload(): Promise<WebDavSyncResult> {
-    return await invoke("s3_sync_upload");
-  },
-
-  async s3SyncDownload(): Promise<WebDavSyncResult> {
-    return await invoke("s3_sync_download");
-  },
-
-  async s3SyncSaveSettings(
-    settings: S3SyncSettings,
-    passwordTouched: boolean,
-  ): Promise<{ success: boolean }> {
-    return await invoke("s3_sync_save_settings", {
-      settings,
-      passwordTouched,
-    });
-  },
-
-  async s3SyncFetchRemoteInfo(): Promise<RemoteSnapshotInfo | { empty: true }> {
-    return await invoke("s3_sync_fetch_remote_info");
   },
 
   async syncCurrentProvidersLive(): Promise<void> {
@@ -329,31 +245,3 @@ export interface LogConfig {
   enabled: boolean;
   level: "error" | "warn" | "info" | "debug" | "trace";
 }
-
-export interface BackupEntry {
-  filename: string;
-  sizeBytes: number;
-  createdAt: string;
-}
-
-export const backupsApi = {
-  async createDbBackup(): Promise<string> {
-    return await invoke("create_db_backup");
-  },
-
-  async listDbBackups(): Promise<BackupEntry[]> {
-    return await invoke("list_db_backups");
-  },
-
-  async restoreDbBackup(filename: string): Promise<string> {
-    return await invoke("restore_db_backup", { filename });
-  },
-
-  async renameDbBackup(oldFilename: string, newName: string): Promise<string> {
-    return await invoke("rename_db_backup", { oldFilename, newName });
-  },
-
-  async deleteDbBackup(filename: string): Promise<void> {
-    await invoke("delete_db_backup", { filename });
-  },
-};

@@ -21,12 +21,6 @@ const SCOPE_SLOT_KEYS: Record<ProfileScope, (keyof PerApp<unknown>)[]> = {
  * 未拍过的项目在该分组应用时不改动配置，只绑定 current 标记。
  */
 export function hasScopeSnapshot(profile: Profile, scope: ProfileScope) {
-  const { providers, mcp, skills, prompts } = profile.payload;
-  return SCOPE_SLOT_KEYS[scope].some(
-    (app) =>
-      providers[app] !== null ||
-      mcp[app] !== null ||
-      skills[app] !== null ||
-      prompts[app] !== null,
-  );
+  const { providers } = profile.payload;
+  return SCOPE_SLOT_KEYS[scope].some((app) => providers[app] !== null);
 }

@@ -111,6 +111,71 @@ pub(crate) async fn effective_codex_aggregate_provider(
     persisted.filter(|provider| provider.is_aggregate())
 }
 
+/// If a cube-dispatch child is talking to the coordinator's proxy with the
+/// registered worker model, send that request to the worker's Cube provider
+/// instead of rewriting the model onto the coordinator.
+fn route_codex_dispatch_child_provider(
+    state: &ProxyState,
+    request_model: &str,
+    providers: Vec<Provider>,
+    provider: Provider,
+) -> (Vec<Provider>, Provider) {
+    let catalog_has_model = provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(|models| models.as_array())
+        .is_some_and(|models| {
+            models.iter().any(|entry| {
+                entry
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    == Some(request_model.trim())
+            })
+        });
+    if catalog_has_model {
+        return (providers, provider);
+    }
+    let Some(route) = crate::codex_agent_workflow::resolve_dispatch_route_for_model(
+        &crate::codex_config::get_codex_config_dir(),
+        request_model,
+    ) else {
+        return (providers, provider);
+    };
+    let dispatch_provider = route
+        .cube_provider_id
+        .as_deref()
+        .filter(|id| *id != provider.id)
+        .and_then(|id| {
+            state
+                .db
+                .get_provider_by_id(id, "codex")
+                .ok()
+                .flatten()
+        })
+        .filter(|found| found.id != provider.id)
+        .or_else(|| {
+            crate::codex_subagent_providers::match_existing_cube_provider(
+                state.db.as_ref(),
+                &crate::codex_config::get_codex_config_dir(),
+                &route.agent_name,
+                request_model,
+            )
+            .filter(|found| found.id != provider.id)
+        });
+    let Some(dispatch_provider) = dispatch_provider else {
+        return (providers, provider);
+    };
+    log::info!(
+        "[Codex] cube-dispatch 模型 `{}` 路由到注册供应商 `{}` ({})",
+        request_model,
+        dispatch_provider.name,
+        dispatch_provider.id
+    );
+    (vec![dispatch_provider.clone()], dispatch_provider)
+}
+
 impl RequestContext {
     /// 创建请求上下文
     ///
@@ -220,7 +285,7 @@ impl RequestContext {
                 .first()
                 .cloned()
                 .ok_or(ProxyError::NoAvailableProvider)?;
-            (providers, provider)
+            route_codex_dispatch_child_provider(state, &request_model, providers, provider)
         };
 
         log::debug!(
@@ -473,6 +538,192 @@ mod tests {
         // 成员路由必须旁路普通 failover 链（providers 只含成员自己）
         assert_eq!(ctx.get_providers().len(), 1);
         assert_eq!(ctx.current_provider_id, "deepseek");
+    }
+
+    fn install_dispatch_worker(dir: &std::path::Path, name: &str, model: &str, provider_id: &str) {
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents").join(format!("{name}.toml")),
+            format!("name = \"{name}\"\nmodel = \"{model}\"\nmodel_reasoning_effort = \"high\"\n"),
+        )
+        .unwrap();
+        let mut roles = crate::codex_agent_workflow::RoleAgents::default();
+        roles.worker = vec![name.to_string()];
+        crate::codex_agent_workflow::install(
+            dir,
+            name,
+            &[name.to_string()],
+            &roles,
+            crate::codex_agent_workflow::WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(crate::codex_subagents::SUBAGENT_MANIFEST_FILENAME),
+            format!(r#"{{"agents":[{{"name":"{name}","providerId":"{provider_id}"}}]}}"#),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dispatch_child_routes_to_registered_worker_provider() {
+        let _home = TempHome::new();
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        let dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        install_dispatch_worker(&dir, "grok-4-6", "grok-4.6", "grok-worker");
+
+        let coordinator = Provider::with_id(
+            "coordinator".to_string(),
+            "Coordinator".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-coord" },
+                "config": "base_url = \"https://opencode.ai/zen/go/v1\"\nwire_api = \"responses\"",
+                "model": "deepseek-v4-flash",
+                "modelCatalog": { "models": [{ "model": "deepseek-v4-flash" }] }
+            }),
+            None,
+        );
+        let worker = Provider::with_id(
+            "grok-worker".to_string(),
+            "Grok worker".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-grok" },
+                "config": "base_url = \"https://790053500.com/v1\"\nwire_api = \"responses\"",
+                "model": "grok-4.6",
+                "modelCatalog": { "models": [{ "model": "grok-4.6" }] }
+            }),
+            None,
+        );
+        db.save_provider("codex", &coordinator)
+            .expect("save coordinator");
+        db.save_provider("codex", &worker).expect("save worker");
+        db.set_current_provider("codex", "coordinator")
+            .expect("set current");
+        crate::settings::set_current_provider(&AppType::Codex, Some("coordinator"))
+            .expect("set settings current");
+
+        let state = build_state(db.clone());
+        let body = serde_json::json!({ "model": "grok-4.6", "input": "hi" });
+        let headers = axum::http::HeaderMap::new();
+        let ctx = RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex")
+            .await
+            .expect("create context");
+
+        assert_eq!(ctx.provider.id, "grok-worker");
+        assert_eq!(ctx.get_providers().len(), 1);
+        assert_eq!(
+            ctx.current_provider_id, "coordinator",
+            "dispatch child routing must not switch the UI current provider"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dispatch_child_matches_worker_url_when_slug_is_not_a_cube_id() {
+        let _home = TempHome::new();
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        let dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        install_dispatch_worker(&dir, "grok-4-6", "grok-4.6", "grok-4-6");
+        std::fs::write(
+            dir.join("agents/grok-4-6.toml"),
+            "name = \"grok-4-6\"\nmodel = \"grok-4.6\"\nmodel_reasoning_effort = \"high\"\n\n[model_providers.custom]\nbase_url = \"https://790053500.com\"\nwire_api = \"responses\"\n",
+        )
+        .unwrap();
+
+        let coordinator = Provider::with_id(
+            "coordinator".to_string(),
+            "Coordinator".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-coord" },
+                "config": "base_url = \"https://opencode.ai/zen/go/v1\"\nwire_api = \"responses\"",
+                "model": "deepseek-v4-flash",
+                "modelCatalog": { "models": [{ "model": "deepseek-v4-flash" }] }
+            }),
+            None,
+        );
+        let worker = Provider::with_id(
+            "xai-uuid".to_string(),
+            "xAI (Grok)".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-grok" },
+                "config": "model_provider = \"custom\"\nmodel = \"grok-4.6\"\n\n[model_providers.custom]\nbase_url = \"https://790053500.com/v1\"\nwire_api = \"responses\"",
+                "modelCatalog": { "models": [{ "model": "grok-4.6" }] }
+            }),
+            None,
+        );
+        db.save_provider("codex", &coordinator)
+            .expect("save coordinator");
+        db.save_provider("codex", &worker).expect("save worker");
+        db.set_current_provider("codex", "coordinator")
+            .expect("set current");
+        crate::settings::set_current_provider(&AppType::Codex, Some("coordinator"))
+            .expect("set settings current");
+
+        let state = build_state(db.clone());
+        let body = serde_json::json!({ "model": "grok-4.6", "input": "hi" });
+        let headers = axum::http::HeaderMap::new();
+        let ctx = RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex")
+            .await
+            .expect("create context");
+
+        assert_eq!(ctx.provider.id, "xai-uuid");
+        assert_eq!(ctx.get_providers().len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dispatch_child_keeps_coordinator_when_catalog_lists_the_model() {
+        let _home = TempHome::new();
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        let dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        install_dispatch_worker(&dir, "grok-4-6", "grok-4.6", "grok-worker");
+
+        let coordinator = Provider::with_id(
+            "coordinator".to_string(),
+            "Coordinator".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-coord" },
+                "config": "base_url = \"https://opencode.ai/zen/go/v1\"\nwire_api = \"responses\"",
+                "model": "deepseek-v4-flash",
+                "modelCatalog": {
+                    "models": [
+                        { "model": "deepseek-v4-flash" },
+                        { "model": "grok-4.6" }
+                    ]
+                }
+            }),
+            None,
+        );
+        let worker = Provider::with_id(
+            "grok-worker".to_string(),
+            "Grok worker".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-grok" },
+                "config": "base_url = \"https://790053500.com/v1\"\nwire_api = \"responses\"",
+                "model": "grok-4.6"
+            }),
+            None,
+        );
+        db.save_provider("codex", &coordinator)
+            .expect("save coordinator");
+        db.save_provider("codex", &worker).expect("save worker");
+        db.set_current_provider("codex", "coordinator")
+            .expect("set current");
+        crate::settings::set_current_provider(&AppType::Codex, Some("coordinator"))
+            .expect("set settings current");
+
+        let state = build_state(db.clone());
+        let body = serde_json::json!({ "model": "grok-4.6", "input": "hi" });
+        let headers = axum::http::HeaderMap::new();
+        let ctx = RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex")
+            .await
+            .expect("create context");
+
+        assert_eq!(ctx.provider.id, "coordinator");
     }
 
     #[tokio::test]

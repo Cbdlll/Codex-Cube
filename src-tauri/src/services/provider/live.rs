@@ -2,18 +2,15 @@
 //!
 //! Handles reading and writing live configuration files for Claude, Codex, and Gemini.
 
-use std::collections::HashMap;
-
-use serde_json::{json, Value};
+use serde_json::Value;
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
-use crate::config::{delete_file, read_json_file, write_json_file};
+use crate::config::{delete_file, write_json_file};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
-use crate::services::mcp::McpService;
 use crate::store::AppState;
 
 /// ChatGPT Codex catalogs gpt-5.6 at a 372K context window with a ~353K
@@ -620,15 +617,6 @@ fn restore_live_settings_for_provider_backfill(
         );
     }
 
-    // MCP 服务器归 DB mcp_servers 表所有，live 里的 [mcp_servers] 是同步投影；
-    // 回填时剥掉，否则已删除的服务器会随供应商快照复活（逐条 reconcile 清不掉孤儿）。
-    if let Err(err) = crate::codex_config::strip_codex_mcp_servers_from_settings(&mut settings) {
-        log::warn!(
-            "Failed to strip mcp_servers while backfilling '{}': {err}",
-            provider.id
-        );
-    }
-
     // 统一会话开关注入的共享 `custom` 路由只属于 live 配置；切换回填时
     // 必须剥掉，否则官方供应商的存储配置被污染，关闭开关后无法还原。
     if provider.category.as_deref() == Some("official") {
@@ -812,13 +800,14 @@ pub(crate) fn sync_current_provider_for_app_to_live(
         let providers = state.db.get_all_providers(app_type.as_str())?;
         if let Some(provider) = providers.get(&current_id) {
             write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
+            if matches!(app_type, AppType::Codex) {
+                crate::codex_state_db::sync_and_log_stale_custom_thread_models_from_live(
+                    provider,
+                    "同步当前供应商到 Live 后",
+                );
+            }
         }
     }
-
-    // 本函数语义是"把这个应用同步到 live"，MCP 重投影也只针对该应用；
-    // 全量 sync_all_enabled 会把无关应用的 live 损坏牵连进来。投影失败
-    // 上抛（不降级）：这里没有已变更的 DB 状态需要保护，调用方重试即可。
-    McpService::sync_enabled_for_app(state, app_type)?;
 
     Ok(())
 }
@@ -855,10 +844,23 @@ fn sync_current_provider_for_app_respecting_takeover(
                 .update_live_backup_from_provider(app_type.as_str(), provider),
         )
         .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+        if matches!(app_type, AppType::Codex) {
+            crate::codex_state_db::sync_and_log_stale_custom_thread_models_from_live(
+                provider,
+                "同步当前供应商到 Live 备份后",
+            );
+        }
         return Ok(());
     }
 
-    write_live_with_common_config(state.db.as_ref(), app_type, provider)
+    write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
+    if matches!(app_type, AppType::Codex) {
+        crate::codex_state_db::sync_and_log_stale_custom_thread_models_from_live(
+            provider,
+            "同步当前供应商到 Live 后",
+        );
+    }
+    Ok(())
 }
 
 /// Sync current provider to live configuration
@@ -882,20 +884,7 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
         }
     }
 
-    // MCP sync（best-effort 逐应用投影，内部已聚合失败）。错误暂存到
-    // Skill 同步之后再返回：MCP 的失败不该跳过 Skill 同步，但调用方
-    //（配置导入 / 云同步恢复）需要知道结果不完整。
-    let mcp_result = McpService::sync_all_enabled(state);
-
-    // Skill sync
-    for app_type in AppType::all() {
-        if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.db, &app_type) {
-            log::warn!("同步 Skill 到 {app_type:?} 失败: {e}");
-            // Continue syncing other apps, don't abort
-        }
-    }
-
-    mcp_result
+    Ok(())
 }
 
 /// Read current live settings for an app type

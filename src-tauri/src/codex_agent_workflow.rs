@@ -87,6 +87,29 @@ impl RoleAgents {
     pub fn is_empty(&self) -> bool {
         self.worker.is_empty() && self.explorer.is_empty() && self.default.is_empty()
     }
+
+    fn names_for_role(&self, role: &str) -> &[String] {
+        match role {
+            crate::codex_subagents::AGENT_TYPE_EXPLORER => &self.explorer,
+            crate::codex_subagents::AGENT_TYPE_DEFAULT => &self.default,
+            _ => &self.worker,
+        }
+    }
+
+    /// 派发选中的 agent：先取该角色列表第一项，空则按 worker → default → explorer 回退。
+    pub fn dispatch_agent_for_role(&self, role: &str) -> Option<&str> {
+        first_nonempty_agent(self.names_for_role(role))
+            .or_else(|| first_nonempty_agent(&self.worker))
+            .or_else(|| first_nonempty_agent(&self.default))
+            .or_else(|| first_nonempty_agent(&self.explorer))
+    }
+}
+
+fn first_nonempty_agent(names: &[String]) -> Option<&str> {
+    names
+        .iter()
+        .map(|name| name.trim())
+        .find(|name| !name.is_empty())
 }
 
 /// 默认 worker：default 角色第一个 → worker 角色第一个 → explorer 角色第一个 → 空。
@@ -98,6 +121,215 @@ pub fn derive_worker_agent(role_agents: &RoleAgents) -> String {
         .or_else(|| role_agents.explorer.first())
         .cloned()
         .unwrap_or_default()
+}
+
+/// cube-dispatch 运行时解析出的派发目标：注册名 + 角色 + agent TOML 中的模型/推理档位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchProfile {
+    pub agent_name: String,
+    pub role: String,
+    pub model: String,
+    pub reasoning_effort: String,
+}
+
+/// 根据 spawn 的 `agent_type` 解析注册代理。无 Workflow / 无法解析时返回 None。
+pub fn resolve_dispatch_profile(
+    config_dir: &Path,
+    agent_type: Option<&str>,
+) -> Option<DispatchProfile> {
+    match resolve_dispatch_target(config_dir, agent_type) {
+        DispatchResolve::Resolved(profile) => Some(profile),
+        DispatchResolve::NoWorkflow | DispatchResolve::Unresolved { .. } => None,
+    }
+}
+
+/// 派发解析结果：区分「未安装 Workflow」与「已安装但解析失败」，避免后者静默落到全局默认模型。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchResolve {
+    NoWorkflow,
+    Unresolved { agent_type: String },
+    Resolved(DispatchProfile),
+}
+
+/// 根据 spawn 的 `agent_type` 解析注册代理。
+///
+/// - 无 Workflow manifest → [`DispatchResolve::NoWorkflow`]（不改写，避免影响未启用协作流的会话）
+/// - 已安装但 TOML/角色无法解析 → [`DispatchResolve::Unresolved`]（禁止静默落到全局默认模型）
+/// - 成功 → [`DispatchResolve::Resolved`]
+pub fn resolve_dispatch_target(config_dir: &Path, agent_type: Option<&str>) -> DispatchResolve {
+    let requested = agent_type.unwrap_or("").trim();
+    let requested = if requested.is_empty() {
+        crate::codex_subagents::AGENT_TYPE_WORKER
+    } else {
+        requested
+    };
+    let manifest = match load_manifest(config_dir) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return DispatchResolve::NoWorkflow,
+        Err(_) => {
+            return DispatchResolve::Unresolved {
+                agent_type: requested.to_owned(),
+            };
+        }
+    };
+
+    let (agent_name, role) = if crate::codex_subagents::AGENT_TYPES.contains(&requested) {
+        let Some(name) = manifest
+            .role_agents
+            .dispatch_agent_for_role(requested)
+            .map(str::to_owned)
+            .or_else(|| {
+                let worker = manifest.worker_agent.trim();
+                (!worker.is_empty()).then(|| worker.to_owned())
+            })
+        else {
+            return DispatchResolve::Unresolved {
+                agent_type: requested.to_owned(),
+            };
+        };
+        (name, requested.to_owned())
+    } else {
+        let role = if manifest
+            .role_agents
+            .explorer
+            .iter()
+            .any(|name| name == requested)
+        {
+            crate::codex_subagents::AGENT_TYPE_EXPLORER.to_owned()
+        } else if manifest
+            .role_agents
+            .default
+            .iter()
+            .any(|name| name == requested)
+        {
+            crate::codex_subagents::AGENT_TYPE_DEFAULT.to_owned()
+        } else {
+            crate::codex_subagents::AGENT_TYPE_WORKER.to_owned()
+        };
+        (requested.to_owned(), role)
+    };
+
+    let Some((model, reasoning_effort)) = read_agent_model_and_effort(config_dir, &agent_name)
+    else {
+        return DispatchResolve::Unresolved {
+            agent_type: requested.to_owned(),
+        };
+    };
+    DispatchResolve::Resolved(DispatchProfile {
+        agent_name,
+        role,
+        model,
+        reasoning_effort,
+    })
+}
+
+/// Cube-dispatch 子代理在代理层的路由：注册名 + 模型 + 可选的 Cube 供应商 id。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchRoute {
+    pub agent_name: String,
+    pub model: String,
+    pub cube_provider_id: Option<String>,
+}
+
+/// 当前 Workflow 已注册、且 agent TOML 中 `model` 等于 `model` 的派发目标。
+///
+/// 用于把 generic `worker` 子会话的请求与「切换供应商后的过期会话模型」区分开：
+/// 前者应保留并路由到注册供应商，后者才回退到当前上游模型。
+pub fn resolve_dispatch_route_for_model(config_dir: &Path, model: &str) -> Option<DispatchRoute> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let Ok(Some(manifest)) = load_manifest(config_dir) else {
+        return None;
+    };
+    for name in workflow_registered_agent_names(&manifest) {
+        let Some((agent_model, _)) = read_agent_model_and_effort(config_dir, &name) else {
+            continue;
+        };
+        if agent_model == model {
+            return Some(DispatchRoute {
+                cube_provider_id: managed_cube_provider_id(config_dir, &name),
+                agent_name: name,
+                model: agent_model,
+            });
+        }
+    }
+    None
+}
+
+pub fn is_registered_dispatch_model(config_dir: &Path, model: &str) -> bool {
+    resolve_dispatch_route_for_model(config_dir, model).is_some()
+}
+
+fn workflow_registered_agent_names(manifest: &WorkflowManifest) -> Vec<String> {
+    let mut names = manifest.role_agents.union();
+    let worker = manifest.worker_agent.trim();
+    if !worker.is_empty() && !names.iter().any(|name| name == worker) {
+        names.push(worker.to_owned());
+    }
+    names
+}
+
+fn managed_cube_provider_id(config_dir: &Path, agent_name: &str) -> Option<String> {
+    let path = config_dir.join(crate::codex_subagents::SUBAGENT_MANIFEST_FILENAME);
+    let text = std::fs::read_to_string(path).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    manifest
+        .get("agents")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find_map(|agent| {
+            let name = agent.get("name").and_then(serde_json::Value::as_str)?;
+            if name != agent_name {
+                return None;
+            }
+            let cube_id = agent
+                .get("cubeProviderId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
+            cube_id.or_else(|| {
+                agent
+                    .get("providerId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+}
+
+fn read_agent_model_and_effort(config_dir: &Path, name: &str) -> Option<(String, String)> {
+    validate_agent_name(name).ok()?;
+    let path = config_dir
+        .join(crate::codex_subagents::SUBAGENT_AGENT_DIRNAME)
+        .join(format!("{name}.toml"));
+    let text = std::fs::read_to_string(path).ok()?;
+    let agent: toml::Value = text.parse().ok()?;
+    let model = agent
+        .get("model")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if model.is_empty() {
+        return None;
+    }
+    // Match list_subagents: a missing effort still yields a usable agent (default medium).
+    // Requiring both fields here would skip model injection and fall back to [agents] defaults.
+    let reasoning_effort = agent
+        .get("model_reasoning_effort")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("medium")
+        .trim();
+    let reasoning_effort = if reasoning_effort.is_empty() {
+        "medium".to_owned()
+    } else {
+        reasoning_effort.to_owned()
+    };
+    Some((model, reasoning_effort))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,9 +408,7 @@ fn agents_table_mut(doc: &mut DocumentMut) -> Result<&mut dyn TableLike, AppErro
     }
     doc.get_mut("agents")
         .and_then(Item::as_table_like_mut)
-        .ok_or_else(|| {
-            AppError::Config("config.toml 的 [agents] 必须是表或内联表".to_string())
-        })
+        .ok_or_else(|| AppError::Config("config.toml 的 [agents] 必须是表或内联表".to_string()))
 }
 
 fn capture_agent_defaults_backup(
@@ -229,6 +459,9 @@ fn capture_agent_defaults_backup(
 
 /// 将 Workflow 当前默认 worker 的模型/推理档位写入 Codex 的 subagent fallback 配置。
 /// 首次安装时保存原值；重复安装只更新值，不覆盖原始备份。
+///
+/// cube-dispatch 的 Skill 安装路径不再调用本函数：generic `worker` 必须从注册
+/// agent TOML 解析模型，并由代理层显式注入，避免全局默认值覆盖后续更换的 worker。
 pub fn sync_agent_defaults(
     config_dir: &Path,
     model: &str,
@@ -271,6 +504,52 @@ pub fn sync_agent_defaults(
             let _ = delete_file(&backup_path);
         }
         return Err(error);
+    }
+    Ok(())
+}
+
+/// Skill 安装不再写入 `[agents].default_subagent_*`。有旧版备份时恢复安装前的值；
+/// 没有备份时清掉残留键，避免 generic `worker` 继续继承上一任 worker 的模型。
+pub fn restore_or_clear_agent_defaults_for_skill_install(
+    config_dir: &Path,
+) -> Result<(), AppError> {
+    let had_backup = read_agent_defaults_backup(config_dir)?.is_some();
+    restore_agent_defaults(config_dir)?;
+    if had_backup {
+        return Ok(());
+    }
+    clear_agent_default_fallback_keys(config_dir)
+}
+
+fn clear_agent_default_fallback_keys(config_dir: &Path) -> Result<(), AppError> {
+    let config_path = config_dir.join("config.toml");
+    let Some(config_text) = read_optional_text(&config_path)? else {
+        return Ok(());
+    };
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("解析 Codex config.toml 失败: {error}")))?;
+    let Some(agents_item) = doc.get_mut("agents") else {
+        return Ok(());
+    };
+    let Some(agents) = agents_item.as_table_like_mut() else {
+        return Err(AppError::Config(
+            "config.toml 的 [agents] 必须是表或内联表".to_string(),
+        ));
+    };
+    let removed = agents.remove("default_subagent_model").is_some()
+        | agents.remove("default_subagent_reasoning_effort").is_some();
+    if !removed {
+        return Ok(());
+    }
+    if agents.is_empty() {
+        doc.as_table_mut().remove("agents");
+    }
+    let next = doc.to_string();
+    if next.trim().is_empty() {
+        delete_file(&config_path)?;
+    } else {
+        write_text_file(&config_path, &next)?;
     }
     Ok(())
 }
@@ -397,10 +676,36 @@ pub fn workflow_uses_agent(config_dir: &Path, name: &str) -> Result<bool, AppErr
         .any(|selected| selected == name))
 }
 
+/// Codex 实际读取的 skills 目录：`~/.codex/skills`，或 settings 覆盖目录下的 `skills`。
+pub fn codex_skills_dir() -> PathBuf {
+    if let Some(custom) = crate::settings::get_codex_override_dir() {
+        custom.join("skills")
+    } else {
+        crate::config::get_home_dir().join(".codex").join("skills")
+    }
+}
+
 pub fn workflow_skill_dir() -> Result<PathBuf, AppError> {
-    let ssot_dir = crate::services::skill::SkillService::get_ssot_dir()
-        .map_err(|error| AppError::Message(error.to_string()))?;
-    Ok(ssot_dir.join(WORKFLOW_SKILL_DIRECTORY))
+    Ok(codex_skills_dir().join(WORKFLOW_SKILL_DIRECTORY))
+}
+
+/// 清掉旧 SkillService SSOT / 旧 skill 名，避免 Codex 同时发现两个 dispatch skill。
+pub fn remove_legacy_workflow_skill_dirs() {
+    let skills = codex_skills_dir();
+    let _ = std::fs::remove_dir_all(skills.join(LEGACY_WORKFLOW_SKILL_DIRECTORY));
+    let leftover_roots = [
+        crate::config::get_app_config_dir().join("skills"),
+        crate::config::get_home_dir().join(".agents").join("skills"),
+    ];
+    for root in leftover_roots {
+        let _ = std::fs::remove_dir_all(root.join(WORKFLOW_SKILL_DIRECTORY));
+        let _ = std::fs::remove_dir_all(root.join(LEGACY_WORKFLOW_SKILL_DIRECTORY));
+    }
+}
+
+pub fn uninstall_workflow_skill_files() {
+    remove_legacy_workflow_skill_dirs();
+    let _ = std::fs::remove_dir_all(codex_skills_dir().join(WORKFLOW_SKILL_DIRECTORY));
 }
 
 pub fn workflow_skill_path() -> Result<PathBuf, AppError> {
@@ -431,8 +736,8 @@ pub fn workflow_skill_metadata(content: &str) -> (Option<String>, Option<String>
 }
 
 /// 生成 Workflow Skill 的 SKILL.md：frontmatter 只含 name/description，
-/// 正文按角色（worker / explorer / default）列出已注册 subagent 及其模型/推理档位，
-/// 并标记默认 worker。角色映射决定派发路由与 fallback 的 agent_type。
+/// 正文按角色列出已注册 subagent 名称（不写入 model / reasoning，避免过期硬编码）。
+/// 运行时从 agent TOML 解析模型，并由代理层在 generic role 派发时显式注入。
 pub fn workflow_skill_markdown(
     agents: &[SubagentRecord],
     role_agents: &RoleAgents,
@@ -507,6 +812,16 @@ without concrete scope.\n\
 of the `worker` / `explorer` / `default` roles, and the same subagent may be listed under \
 multiple roles.\n",
     );
+    output.push_str(
+        "- The runtime registration files in `~/.codex/agents/*.toml` and the current spawn-tool \
+schema are authoritative. This document must not duplicate model names, reasoning levels, or a \
+default worker: those values may change after installation.\n",
+    );
+    output.push_str(
+        "- At dispatch time, resolve the selected agent name, `model`, and `model_reasoning_effort` \
+from the current registration and pass those values explicitly when the tool requires a generic role.\n",
+    );
+    let mut listed_any_role = false;
     for (role, names) in [
         ("worker", &role_agents.worker),
         ("explorer", &role_agents.explorer),
@@ -515,18 +830,23 @@ multiple roles.\n",
         if names.is_empty() {
             continue;
         }
+        listed_any_role = true;
         output.push_str(&format!("- **{role}:**\n"));
         for name in names {
             let Some(agent) = agents.iter().find(|a| &a.name == name) else {
                 continue;
             };
-            output.push_str(&format!(
-                "  - `{}` (model: {}, reasoning: {})\n",
-                agent.name, agent.model, agent.reasoning_effort
-            ));
+            output.push_str(&format!("  - `{}`\n", agent.name));
         }
     }
-    output.push_str(&format!("\n**Default worker:** `{worker_agent}`\n\n"));
+    if !listed_any_role && !worker_agent.trim().is_empty() {
+        output.push_str(&format!(
+            "- No role mapping is currently listed. Dispatch using the registered agent \
+`{worker_agent}` after resolving its `model` and `model_reasoning_effort` from \
+`~/.codex/agents/{worker_agent}.toml`.\n"
+        ));
+    }
+    output.push('\n');
     output.push_str(
         "## When to delegate\n\
 - By default, delegate every bounded subtask identified by the Dispatch flow; do not keep \
@@ -558,35 +878,31 @@ role list (`worker` → `default` → `explorer`), then to the default worker.\n
 to continue) when available, or the app thread tools (`create_thread` + \
 `send_message_to_thread` + `wait_threads`) when those are the only subagent tools exposed. \
 Never call a tool that is not in the current tool list.\n\
-- Inspect the current spawn tool schema before dispatching. If the selected registered agent \
-name appears in the allowed `agent_type` values, pass that exact name as `agent_type`; this is \
-the primary path and loads the custom agent file directly.\n\
-- For a generic-role fallback, the registered `model` and `reasoning_effort` are mandatory spawn \
-arguments. An exact custom `agent_type` selects the registered routing profile; a generic role does \
-not.\n\
-- If the registered name is not an allowed `agent_type`, use the allowed generic role matching \
-the subagent's registered type (`worker` for worker-typed, `explorer` for explorer-typed, \
-`default` for default-typed) and pass the registered `model` and `reasoning_effort` explicitly. \
-This is a compatibility fallback for sessions whose tool schema does not expose custom agent \
-types. A generic-role spawn without both explicit fields is invalid: do not send it; report that \
-the registered subagent cannot be dispatched on this Codex surface. In particular, never send \
-`agent_type: "explorer"` or `agent_type: "worker"` by itself for a registered custom agent, and \
-never invent or pass an `agent_type` value absent from the current schema.\n\
-- Required fallback shape (replace the values with the selected registered agent): \
-`{\"task_name\":\"...\",\"agent_type\":\"explorer\",\"model\":\"deepseek-v4-flash\",\"reasoning_effort\":\"max\",\"fork_turns\":\"none\",\"message\":\"...\"}`. \
-If either `model` or `reasoning_effort` is missing from the tool schema, stop instead of spawning; \
-do not let the parent conversation fill the missing value.\n\
-- For fallback dispatch, resolution order is: explicit spawn value > custom agent file > `[agents]` \
-defaults (`default_subagent_model`, `default_subagent_reasoning_effort`) > parent value. Because \
-parent inheritance can select the wrong model, never rely on the parent value for a dispatch.\n\
-- After every generic-role fallback, verify the child thread metadata reports the registered model \
-and reasoning effort. If it reports the coordinator's model or another unregistered model, \
-stop/interrupt that worker, report dispatch failure, and do not accept its result as work from the \
-selected subagent.\n\
-- Treat a successful compatibility fallback as normal dispatch only after the child metadata \
-confirms the registered model and effort; do not add a user-facing caveat solely because the \
-custom `agent_type` was unavailable. Report it if verification fails or the fallback changes the \
-requested behavior.\n\
+- Inspect the current spawn tool schema before dispatching. Spawn with the allowed generic \
+role matching the subagent's registered type (`worker` for worker-typed, `explorer` for \
+explorer-typed, `default` for default-typed) and pass the resolved `model` and \
+`reasoning_effort` explicitly. Current Codex collaboration spawn instantiates those built-in \
+roles; a registered custom name in the schema is not a spawnable `agent_type` and returns \
+\"agent type is currently not available\".\n\
+- Before dispatching, resolve the selected registered agent's current `model` and \
+`model_reasoning_effort` from `~/.codex/agents/<name>.toml`; never copy a model name into this \
+skill or assume a stale global default.\n\
+- Never invent or pass an `agent_type` value absent from the current schema. Do not pass a \
+registered agent file name as `agent_type` even if it appears in the schema enum.\n\
+- Never dispatch a generic role without explicit `model` and `reasoning_effort`; do not rely on \
+`[agents]` defaults or the parent model for routing.\n\
+- Codex Cube's local proxy rewrites `spawn_agent` calls to keep `agent_type` as a built-in \
+role and to inject the `model` and `reasoning_effort` resolved from the registered agent TOML. \
+A custom name emitted by the model is mapped back to the role. That rewrite is the runtime \
+guarantee: spawn must not inherit `[agents].default_subagent_model` or the parent model, and \
+must not send a custom `agent_type` the collaboration runtime cannot instantiate. If the child \
+turn still uses a different model, treat the dispatch as failed.\n\
+- After every dispatch, verify the child session's `turn_context.model` and reasoning effort \
+against the values resolved from the agent TOML before accepting the result; a successful spawn \
+alone does not prove correct routing.\n\
+- Treat mapping a listed custom name back to the generic role as normal dispatch; do not add a \
+user-facing caveat solely because the schema listed that name. Report it only if delegation \
+fails or the fallback changes requested behavior.\n\
 - Use the same registered reasoning_effort on every round and when resuming; never let \
 the worker run at a different effort than registered.\n\
 - Codex handles spawning, follow-up routing, waiting for results, and closing threads; \
@@ -622,9 +938,10 @@ propose patches).\n\
     );
     output.push_str(
         "## Global settings\n\
-- Codex-level `[agents]` settings control subagent behavior: `enabled`, \
-`max_concurrent_threads_per_session`, `default_subagent_model`, `default_subagent_reasoning_effort`, \
-and `interrupt_message`. Explicit spawn values override the defaults.\n\n",
+- Codex-level `[agents]` settings control subagent behavior such as `enabled`, \
+`max_concurrent_threads_per_session`, and `interrupt_message`. cube-dispatch routing does not \
+use `[agents].default_subagent_model` or `default_subagent_reasoning_effort`; the registered \
+agent TOML and the proxy rewrite are authoritative.\n\n",
     );
     output.push_str(
         "## Coordination & acceptance\n\
@@ -1096,7 +1413,10 @@ mod tests {
 
         let error = sync_agent_defaults(temp.path(), "deepseek-v4-flash", "max").unwrap_err();
         assert!(error.to_string().contains("[agents]"));
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), "agents = \"not-a-table\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "agents = \"not-a-table\"\n"
+        );
         assert!(!agent_defaults_backup_path(temp.path()).exists());
     }
 
@@ -1117,7 +1437,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("agent 名称"));
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), "model = \"gpt-5.6-sol\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "model = \"gpt-5.6-sol\"\n"
+        );
         assert!(!agent_defaults_backup_path(temp.path()).exists());
         assert!(!manifest_path(temp.path()).exists());
     }
@@ -1666,6 +1989,7 @@ mod tests {
             reasoning_effort: reasoning_effort.to_string(),
             wire_api: "responses".to_string(),
             agent_type: "worker".to_string(),
+            cube_provider_id: None,
         }
     }
 
@@ -1697,17 +2021,16 @@ mod tests {
         assert!(markdown
             .contains("dispatch registered workers by default instead of doing the work inline"));
         assert!(markdown.contains("- **worker:**"));
-        assert!(
-            markdown.contains("  - `deepseek-flash` (model: deepseek-v4-flash, reasoning: xhigh)")
-        );
-        assert!(markdown.contains("  - `gpt-sol-worker` (model: gpt-5.6-sol, reasoning: high)"));
+        assert!(markdown.contains("  - `deepseek-flash`"));
+        assert!(!markdown.contains("model: deepseek-v4-flash"));
+        assert!(!markdown.contains("reasoning: xhigh"));
+        assert!(markdown.contains("  - `gpt-sol-worker`"));
         assert!(markdown.contains("- **explorer:**"));
-        assert!(
-            markdown.contains("  - `explorer-agent` (model: deepseek-v4-flash, reasoning: max)")
-        );
+        assert!(markdown.contains("  - `explorer-agent`"));
         assert!(!markdown.contains("- **default:**"));
         assert!(markdown.contains("same subagent may be listed under multiple roles"));
-        assert!(markdown.contains("**Default worker:** `deepseek-flash`"));
+        assert!(!markdown.contains("**Default worker:**"));
+        assert!(markdown.contains("must not duplicate model names"));
         assert!(markdown.contains("## Dispatch flow (execute on activation)"));
         assert!(markdown.contains("1. Decompose the user's request"));
         assert!(markdown.contains("2. Spawn one worker per subtask immediately and in parallel"));
@@ -1722,19 +2045,14 @@ mod tests {
         assert!(markdown.contains("## Triggering"));
         assert!(markdown.contains("## Spawning protocol"));
         assert!(markdown.contains("fork_turns=\"none\""));
-        assert!(markdown.contains(
-            "If the selected registered agent name appears in the allowed `agent_type` values"
-        ));
-        assert!(markdown.contains("pass that exact name as `agent_type`"));
-        assert!(markdown.contains("use the allowed generic role matching"));
+        assert!(markdown.contains("Spawn with the allowed generic role matching"));
         assert!(markdown.contains("`worker` for worker-typed, `explorer` for explorer-typed"));
-        assert!(markdown.contains("pass `model` and `reasoning_effort` explicitly"));
-        assert!(markdown.contains("Required fallback shape"));
-        assert!(markdown.contains(
-            r#"{"task_name":"...","agent_type":"explorer","model":"deepseek-v4-flash","reasoning_effort":"max""#
-        ));
-        assert!(markdown.contains("`agent_type: \"explorer\"` or `agent_type: \"worker\"`"));
-        assert!(markdown.contains("do not let the parent conversation fill the missing value"));
+        assert!(markdown.contains("pass the resolved `model` and `reasoning_effort` explicitly"));
+        assert!(markdown.contains("agent type is currently not available"));
+        assert!(markdown.contains("Do not pass a registered agent file name as `agent_type`"));
+        assert!(markdown.contains("Never dispatch a generic role without explicit"));
+        assert!(markdown.contains("keep `agent_type` as a built-in"));
+        assert!(markdown.contains("turn_context.model"));
         assert!(markdown.contains("`worker` role list (first listed agent wins)"));
         assert!(markdown
             .contains("Never invent or pass an `agent_type` value absent from the current schema"));
@@ -1764,11 +2082,14 @@ mod tests {
             "empty-worker",
         );
 
-        assert!(markdown.contains("**Default worker:** `empty-worker`"));
+        assert!(markdown.contains(
+            "Dispatch using the registered agent `empty-worker` after resolving its `model`"
+        ));
         // 空角色映射不列出任何角色分组的 agent。
         assert!(!markdown.contains("- **worker:**"));
         assert!(!markdown.contains("- **explorer:**"));
         assert!(!markdown.contains("- **default:**"));
+        assert!(!markdown.contains("**Default worker:**"));
         assert!(markdown.contains("then to the default worker"));
     }
 
@@ -1972,5 +2293,158 @@ mod tests {
         assert_eq!(name.as_deref(), Some("cube-dispatch"));
         assert!(description.is_some_and(|description| description.contains("bounded subtasks")));
         assert_eq!(workflow_skill_metadata("no frontmatter"), (None, None));
+    }
+
+    #[test]
+    fn resolve_dispatch_profile_reads_role_agent_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents/grok-4-6.toml"),
+            "name = \"grok-4-6\"\nmodel = \"grok-4.6\"\nmodel_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+        let mut roles = RoleAgents::default();
+        roles.worker = vec!["grok-4-6".to_string()];
+        install(
+            dir,
+            "grok-4-6",
+            &["grok-4-6".to_string()],
+            &roles,
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
+
+        let worker = resolve_dispatch_profile(dir, Some("worker")).unwrap();
+        assert_eq!(worker.agent_name, "grok-4-6");
+        assert_eq!(worker.role, "worker");
+        assert_eq!(worker.model, "grok-4.6");
+        assert_eq!(worker.reasoning_effort, "high");
+
+        let custom = resolve_dispatch_profile(dir, Some("grok-4-6")).unwrap();
+        assert_eq!(custom.model, "grok-4.6");
+        assert_eq!(
+            resolve_dispatch_target(dir, Some("worker")),
+            DispatchResolve::Resolved(worker)
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_target_is_no_workflow_without_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_dispatch_target(temp.path(), Some("worker")),
+            DispatchResolve::NoWorkflow
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_target_is_unresolved_when_manifest_is_unreadable() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(manifest_path(temp.path()), "{not-json").unwrap();
+        assert_eq!(
+            resolve_dispatch_target(temp.path(), Some("worker")),
+            DispatchResolve::Unresolved {
+                agent_type: "worker".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_dispatch_profile_defaults_missing_reasoning_effort() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents/grok-4-6.toml"),
+            "name = \"grok-4-6\"\nmodel = \"grok-4.6\"\n",
+        )
+        .unwrap();
+        let mut roles = RoleAgents::default();
+        roles.worker = vec!["grok-4-6".to_string()];
+        install(
+            dir,
+            "grok-4-6",
+            &["grok-4-6".to_string()],
+            &roles,
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
+
+        let profile = resolve_dispatch_profile(dir, Some("worker")).unwrap();
+        assert_eq!(profile.model, "grok-4.6");
+        assert_eq!(profile.reasoning_effort, "medium");
+    }
+
+    #[test]
+    fn restore_or_clear_agent_defaults_restores_backup_on_skill_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(&config, "model = \"gpt-5.6-sol\"\n").unwrap();
+        sync_agent_defaults(temp.path(), "deepseek-v4-flash", "max").unwrap();
+        assert!(std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("default_subagent_model"));
+
+        restore_or_clear_agent_defaults_for_skill_install(temp.path()).unwrap();
+        let restored = std::fs::read_to_string(&config).unwrap_or_default();
+        assert!(!restored.contains("default_subagent_model"));
+        assert!(!restored.contains("default_subagent_reasoning_effort"));
+        assert!(!agent_defaults_backup_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn restore_or_clear_agent_defaults_strips_leftover_keys_without_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "model = \"gpt-5.6-sol\"\n\n[agents]\nenabled = true\ndefault_subagent_model = \"deepseek-v4-flash\"\ndefault_subagent_reasoning_effort = \"max\"\n",
+        )
+        .unwrap();
+
+        restore_or_clear_agent_defaults_for_skill_install(temp.path()).unwrap();
+        let cleared = std::fs::read_to_string(&config).unwrap();
+        assert!(cleared.contains("enabled = true"));
+        assert!(!cleared.contains("default_subagent_model"));
+        assert!(!cleared.contains("default_subagent_reasoning_effort"));
+    }
+
+    #[test]
+    fn resolve_dispatch_route_for_model_reads_registered_provider_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents/grok-4-6.toml"),
+            "name = \"grok-4-6\"\nmodel = \"grok-4.6\"\nmodel_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+        let mut roles = RoleAgents::default();
+        roles.worker = vec!["grok-4-6".to_string()];
+        install(
+            dir,
+            "grok-4-6",
+            &["grok-4-6".to_string()],
+            &roles,
+            WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(crate::codex_subagents::SUBAGENT_MANIFEST_FILENAME),
+            r#"{"agents":[{"name":"grok-4-6","providerId":"slug-id","cubeProviderId":"cube-grok"}]}"#,
+        )
+        .unwrap();
+
+        let route = resolve_dispatch_route_for_model(dir, "grok-4.6").unwrap();
+        assert_eq!(route.agent_name, "grok-4-6");
+        assert_eq!(route.model, "grok-4.6");
+        assert_eq!(route.cube_provider_id.as_deref(), Some("cube-grok"));
+        assert!(is_registered_dispatch_model(dir, "grok-4.6"));
+        assert!(!is_registered_dispatch_model(dir, "gpt-5.6-luna"));
     }
 }

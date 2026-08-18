@@ -1,10 +1,9 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { providersApi, sessionsApi, settingsApi, type AppId } from "@/lib/api";
-import type { DeleteSessionOptions } from "@/lib/api/sessions";
+import { providersApi, settingsApi, type AppId } from "@/lib/api";
 import type { SwitchResult } from "@/lib/api/providers";
-import type { Provider, SessionMeta, Settings } from "@/types";
+import type { Provider, Settings } from "@/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { generateUUID } from "@/utils/uuid";
 import { usageKeys } from "@/lib/query/usage";
@@ -224,50 +223,6 @@ export const useSwitchProviderMutation = (appId: AppId) => {
             },
           },
         },
-      );
-    },
-  });
-};
-
-export const useDeleteSessionMutation = () => {
-  const queryClient = useQueryClient();
-  const { t } = useTranslation();
-
-  return useMutation({
-    mutationFn: async (input: DeleteSessionOptions) => {
-      await sessionsApi.delete(input);
-      return input;
-    },
-    onSuccess: async (input) => {
-      queryClient.setQueryData<SessionMeta[]>(["sessions"], (current) =>
-        (current ?? []).filter(
-          (session) =>
-            !(
-              session.providerId === input.providerId &&
-              session.sessionId === input.sessionId &&
-              session.sourcePath === input.sourcePath
-            ),
-        ),
-      );
-      queryClient.removeQueries({
-        queryKey: ["sessionMessages", input.providerId, input.sourcePath],
-      });
-
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-
-      toast.success(
-        t("sessionManager.sessionDeleted", {
-          defaultValue: "会话已删除",
-        }),
-      );
-    },
-    onError: (error: Error) => {
-      const detail = extractErrorMessage(error) || t("common.unknown");
-      toast.error(
-        t("sessionManager.deleteFailed", {
-          defaultValue: "删除会话失败: {{error}}",
-          error: detail,
-        }),
       );
     },
   });

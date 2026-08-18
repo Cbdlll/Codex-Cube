@@ -2096,14 +2096,6 @@ impl RequestForwarder {
     }
 }
 
-/// 从 ProxyError 中提取错误消息
-fn extract_error_message(error: &ProxyError) -> Option<String> {
-    match error {
-        ProxyError::UpstreamError { body, .. } => body.clone(),
-        _ => Some(error.to_string()),
-    }
-}
-
 /// 检测 Provider 是否为 Bedrock（通过 CLAUDE_CODE_USE_BEDROCK 环境变量判断）
 fn is_bedrock_provider(provider: &Provider) -> bool {
     provider
@@ -3557,43 +3549,6 @@ mod tests {
         let url = append_query_to_full_url("https://relay.example/api?foo=bar", Some("x-id=1"));
 
         assert_eq!(url, "https://relay.example/api?foo=bar&x-id=1");
-    }
-
-    #[test]
-    fn build_gemini_native_url_uses_origin_when_base_ends_with_v1beta() {
-        let url = crate::proxy::gemini_url::build_gemini_native_url(
-            "https://generativelanguage.googleapis.com/v1beta",
-            "/v1beta/models/gemini-2.5-pro:generateContent",
-        );
-
-        assert_eq!(
-            url,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
-        );
-    }
-
-    #[test]
-    fn build_gemini_native_url_uses_origin_when_base_already_contains_models_prefix() {
-        let url = crate::proxy::gemini_url::build_gemini_native_url(
-            "https://generativelanguage.googleapis.com/v1beta/models",
-            "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
-        );
-
-        assert_eq!(
-            url,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
-        );
-    }
-
-    #[test]
-    fn resolve_gemini_native_url_keeps_opaque_full_url_as_is() {
-        let url = crate::proxy::gemini_url::resolve_gemini_native_url(
-            "https://relay.example/custom/generate-content",
-            "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
-            true,
-        );
-
-        assert_eq!(url, "https://relay.example/custom/generate-content?alt=sse");
     }
 
     #[test]

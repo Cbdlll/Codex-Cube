@@ -33,6 +33,7 @@ use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 
 use super::transform_codex_chat::flatten_namespace_tool_name;
+use super::transform_codex_spawn_agent::{rewrite_spawn_agent_in_event, SpawnRewriteState};
 use crate::proxy::error::ProxyError;
 use crate::proxy::sse::{append_utf8_safe, strip_sse_field, take_sse_block};
 
@@ -491,6 +492,7 @@ pub(crate) fn create_namespace_restore_sse_stream<E>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
     map: HashMap<String, NamespacedName>,
     mark_collaboration_plaintext: bool,
+    rewrite_spawn_agent: bool,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
 where
     E: std::error::Error + Send + 'static,
@@ -498,6 +500,7 @@ where
     async_stream::stream! {
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
+        let mut spawn_state = SpawnRewriteState::new();
 
         tokio::pin!(stream);
 
@@ -509,7 +512,13 @@ where
                         if block.trim().is_empty() {
                             continue;
                         }
-                        yield Ok(restore_sse_block(&block, &map, mark_collaboration_plaintext));
+                        yield Ok(restore_sse_block(
+                            &block,
+                            &map,
+                            mark_collaboration_plaintext,
+                            rewrite_spawn_agent,
+                            &mut spawn_state,
+                        ));
                     }
                 }
                 Err(e) => {
@@ -526,7 +535,13 @@ where
         }
         let tail = std::mem::take(&mut buffer);
         if !tail.trim().is_empty() {
-            yield Ok(restore_sse_block(&tail, &map, mark_collaboration_plaintext));
+            yield Ok(restore_sse_block(
+                &tail,
+                &map,
+                mark_collaboration_plaintext,
+                rewrite_spawn_agent,
+                &mut spawn_state,
+            ));
         }
     }
 }
@@ -538,7 +553,18 @@ fn restore_sse_block(
     block: &str,
     map: &HashMap<String, NamespacedName>,
     mark_collaboration_plaintext: bool,
+    rewrite_spawn_agent: bool,
+    spawn_state: &mut SpawnRewriteState,
 ) -> Bytes {
+    if map.is_empty()
+        && !mark_collaboration_plaintext
+        && rewrite_spawn_agent
+        && !block.contains("spawn_agent")
+        && !spawn_state.has_pending_spawn_ids()
+    {
+        return Bytes::from(format!("{block}\n\n"));
+    }
+
     let mut event_name: Option<&str> = None;
     let mut data_parts: Vec<&str> = Vec::new();
     for line in block.lines() {
@@ -568,6 +594,9 @@ fn restore_sse_block(
     let mut changed = restore_sse_event_namespaces(&mut event, map);
     if mark_collaboration_plaintext {
         changed |= mark_plaintext_collaboration_calls(&mut event);
+    }
+    if rewrite_spawn_agent {
+        changed |= rewrite_spawn_agent_in_event(&mut event, spawn_state);
     }
     if !changed {
         return Bytes::from(format!("{block}\n\n"));
@@ -753,7 +782,7 @@ mod tests {
         let event = "event: response.output_item.added\n\
                      data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\"}}\n\n";
         let input = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(event))]);
-        let out = create_namespace_restore_sse_stream(input, HashMap::new(), true);
+        let out = create_namespace_restore_sse_stream(input, HashMap::new(), true, false);
         futures::pin_mut!(out);
         let mut collected = String::new();
         while let Some(chunk) = out.next().await {
@@ -905,7 +934,7 @@ mod tests {
             Ok(Bytes::from(done)),
         ];
         let input = stream::iter(chunks);
-        let out = create_namespace_restore_sse_stream(input, map, false);
+        let out = create_namespace_restore_sse_stream(input, map, false, false);
         futures::pin_mut!(out);
 
         let mut collected = String::new();

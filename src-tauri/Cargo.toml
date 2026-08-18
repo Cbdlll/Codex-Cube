@@ -1,6 +1,6 @@
 [package]
 name = "codex-cube"
-version = "1.0.0"
+version = "1.0.1"
 description = "Codex subscription and provider manager"
 authors = ["Jason Young"]
 license = "MIT"

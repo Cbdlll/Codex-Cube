@@ -59,12 +59,6 @@ import { Button } from "@/components/ui/button";
 
 type View = "providers" | "settings" | "agents";
 
-interface SyncStatusUpdatedPayload {
-  source?: string;
-  status?: string;
-  error?: string;
-}
-
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 
 const VIEW_STORAGE_KEY = "codex-cube-last-view";
@@ -180,38 +174,6 @@ function App() {
     await queryClient.invalidateQueries({ queryKey: proxyKeys.status });
     await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
   });
-
-  useTauriEvent<SyncStatusUpdatedPayload | null | undefined>(
-    "webdav-sync-status-updated",
-    async (payload) => {
-      const statusPayload = payload ?? {};
-      await queryClient.invalidateQueries({ queryKey: ["settings"] });
-      if (statusPayload.source !== "auto" || statusPayload.status !== "error") {
-        return;
-      }
-      toast.error(
-        t("settings.webdavSync.autoSyncFailedToast", {
-          error: statusPayload.error || t("common.unknown"),
-        }),
-      );
-    },
-  );
-
-  useTauriEvent<SyncStatusUpdatedPayload | null | undefined>(
-    "s3-sync-status-updated",
-    async (payload) => {
-      const statusPayload = payload ?? {};
-      await queryClient.invalidateQueries({ queryKey: ["settings"] });
-      if (statusPayload.source !== "auto" || statusPayload.status !== "error") {
-        return;
-      }
-      toast.error(
-        t("settings.s3Sync.autoSyncFailedToast", {
-          error: statusPayload.error || t("common.unknown"),
-        }),
-      );
-    },
-  );
 
   useTauriEvent<{ appType: string; providerName: string }>(
     "proxy-official-warning",
@@ -728,20 +690,6 @@ function App() {
                   <ProfileSwitcher activeApp="codex" />
                 </div>
               )}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => {
-                setSettingsDefaultTab("usage");
-                setCurrentView("settings");
-              }}
-              title={t("usage.title", {
-                defaultValue: "使用统计",
-              })}
-              className="hover:bg-black/5 dark:hover:bg-white/5"
-            >
-              <BarChart2 className="w-4 h-4" />
-            </Button>
             <UpdateBadge
               onClick={() => {
                 setSettingsDefaultTab("about");

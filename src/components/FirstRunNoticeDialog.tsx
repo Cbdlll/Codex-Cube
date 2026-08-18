@@ -26,8 +26,7 @@ export function FirstRunNoticeDialog() {
   const handleAcknowledge = async () => {
     if (!settings) return;
     try {
-      const { webdavSync: _, ...rest } = settings;
-      await settingsApi.save({ ...rest, firstRunNoticeConfirmed: true });
+      await settingsApi.save({ ...settings, firstRunNoticeConfirmed: true });
       await queryClient.invalidateQueries({ queryKey: ["settings"] });
     } catch (error) {
       console.error("Failed to save firstRunNoticeConfirmed:", error);

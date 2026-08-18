@@ -438,6 +438,16 @@ fn apply_codex_converted_upstream_model(
             if catalog_model_ids.contains(request_model) {
                 return Some(request_model.to_string());
             }
+            // cube-dispatch children may send a registered worker model that the
+            // coordinator provider does not list. Do not treat that as a stale
+            // thread leftover — rewriting it back to the coordinator model is
+            // the generic-worker dispatch failure mode.
+            if crate::codex_agent_workflow::is_registered_dispatch_model(
+                &crate::codex_config::get_codex_config_dir(),
+                request_model,
+            ) {
+                return Some(request_model.to_string());
+            }
         }
     }
 
@@ -1384,6 +1394,75 @@ wire_api = "responses"
             Some("deepseek-v4-flash"),
             "an unsupported native Responses model must fall back to the provider model"
         );
+    }
+
+    struct TestHomeGuard(Option<std::ffi::OsString>);
+    impl TestHomeGuard {
+        fn set(home: &std::path::Path) -> Self {
+            let guard = Self(std::env::var_os("CODEX_CUBE_TEST_HOME"));
+            std::env::set_var("CODEX_CUBE_TEST_HOME", home);
+            guard
+        }
+    }
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("CODEX_CUBE_TEST_HOME", value),
+                None => std::env::remove_var("CODEX_CUBE_TEST_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_apply_codex_upstream_model_preserves_registered_dispatch_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = TestHomeGuard::set(temp.path());
+        let dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents/grok-4-6.toml"),
+            "name = \"grok-4-6\"\nmodel = \"grok-4.6\"\nmodel_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+        let mut roles = crate::codex_agent_workflow::RoleAgents::default();
+        roles.worker = vec!["grok-4-6".to_string()];
+        crate::codex_agent_workflow::install(
+            &dir,
+            "grok-4-6",
+            &["grok-4-6".to_string()],
+            &roles,
+            crate::codex_agent_workflow::WORKFLOW_MODE_SKILL,
+            "high",
+        )
+        .unwrap();
+
+        let provider = create_provider(json!({
+            "config": r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+
+[model_providers.custom]
+base_url = "https://opencode.ai/zen/go/v1"
+wire_api = "responses"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "model": "deepseek-v4-flash" }
+                ]
+            }
+        }));
+        let mut body = json!({ "model": "grok-4.6", "input": "hi" });
+        let result = apply_codex_upstream_model(&provider, &mut body);
+        assert_eq!(result.as_deref(), Some("grok-4.6"));
+        assert_eq!(
+            body.get("model").and_then(JsonValue::as_str),
+            Some("grok-4.6"),
+            "a cube-dispatch worker model must not be rewritten onto the coordinator"
+        );
+
+        let mut stale = json!({ "model": "gpt-5.4", "input": "hi" });
+        let stale_result = apply_codex_upstream_model(&provider, &mut stale);
+        assert_eq!(stale_result.as_deref(), Some("deepseek-v4-flash"));
     }
 
     #[test]

@@ -126,14 +126,9 @@ export function useSettings(): UseSettingsResult {
 
       try {
         const sanitizedCodexDir = sanitizeDir(mergedSettings.codexConfigDir);
-        const {
-          webdavSync: _ignoredWebdavSync,
-          s3Sync: _ignoredS3Sync,
-          ...restSettings
-        } = mergedSettings;
 
         const payload: Settings = {
-          ...restSettings,
+          ...mergedSettings,
           codexConfigDir: sanitizedCodexDir,
           language: mergedSettings.language,
         };
@@ -206,14 +201,9 @@ export function useSettings(): UseSettingsResult {
         const sanitizedCodexDir = sanitizeDir(mergedSettings.codexConfigDir);
         const previousAppDir = initialAppConfigDir;
         const previousCodexDir = sanitizeDir(data?.codexConfigDir);
-        const {
-          webdavSync: _ignoredWebdavSync,
-          s3Sync: _ignoredS3Sync,
-          ...restSettings
-        } = mergedSettings;
 
         const payload: Settings = {
-          ...restSettings,
+          ...mergedSettings,
           codexConfigDir: sanitizedCodexDir,
           language: mergedSettings.language,
         };

@@ -405,7 +405,7 @@ pub fn parse_and_merge_config(
     // Step 3: Extract values from config based on app type and merge with URL params
     let mut merged = request.clone();
 
-    // MCP, Skill and other resource types don't need config merging
+    // Non-provider resource types don't need config merging
     if request.resource != "provider" {
         return Ok(merged);
     }

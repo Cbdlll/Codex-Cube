@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use crate::app_config::AppType;
-use crate::init_status::{InitErrorPayload, SkillsMigrationPayload};
+use crate::init_status::InitErrorPayload;
 use crate::services::ProviderService;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -87,13 +87,6 @@ pub async fn get_init_error() -> Result<Option<InitErrorPayload>, String> {
 #[tauri::command]
 pub async fn get_migration_result() -> Result<bool, String> {
     Ok(crate::init_status::take_migration_success())
-}
-
-/// 获取 Skills 自动导入（SSOT）迁移结果（若有）。
-/// 只返回一次 Some({count})，之后返回 None，用于前端显示一次性 Toast 通知。
-#[tauri::command]
-pub async fn get_skills_migration_result() -> Result<Option<SkillsMigrationPayload>, String> {
-    Ok(crate::init_status::take_skills_migration_result())
 }
 
 #[derive(serde::Serialize)]
@@ -5090,11 +5083,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[test]
-    #[test]
-    #[test]
-    #[test]
     #[test]
     fn cli_path_env_search_paths_include_path_entries_and_dedupe() {
         let temp = tempfile::tempdir().expect("temp dir should be created");

@@ -15,7 +15,6 @@ use crate::app_config::AppType;
 use crate::database::{validate_cost_multiplier, validate_pricing_source};
 use crate::error::AppError;
 use crate::provider::{Provider, UsageResult};
-use crate::services::mcp::McpService;
 use crate::settings::CustomEndpoint;
 use crate::store::AppState;
 
@@ -81,18 +80,6 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
     }
 
     live::write_live_with_common_config(&state.db, &AppType::Codex, provider)?;
-    // 重写 live 会整体替换 config.toml（有意设计），[mcp_servers] 随之丢失，
-    // 写完必须立刻从 DB 重新投影启用的 MCP。只投影 Codex 而非
-    // sync_all_enabled：后者按 AppType::all() 顺序逐应用短路，排在 Codex
-    // 前面的无关应用 live 损坏（如 ~/.claude.json 坏 JSON）会阻断 Codex
-    // 的重投影，让刚被清掉的 [mcp_servers] 无人补回。
-    // 投影失败降级为警告：走到这里 live 已按新开关状态落盘，开关事实上
-    // 已生效；若把错误上抛，save_settings 会回滚开关设置，制造"设置=旧值、
-    // live=新桶"的会话分裂——正是该回滚要防止的状态。MCP 投影可自愈
-    // （下次切换 / 任一 MCP 启停操作都会重新投影）。
-    if let Err(err) = McpService::sync_enabled_for_app(state, &AppType::Codex) {
-        log::warn!("统一会话开关重写 live 后重投影 Codex MCP 失败（将在下次同步时自愈）: {err}");
-    }
     Ok(true)
 }
 
@@ -270,6 +257,445 @@ mod tests {
             assert!(!crate::codex_config::read_codex_config_text()
                 .expect("read live config.toml")
                 .contains("sk-old-current"));
+        });
+    }
+    #[test]
+    #[serial]
+    fn update_current_codex_provider_syncs_stale_custom_thread_models() {
+        // Saving the current ordinary Codex provider (not a switch) must still
+        // rewrite `custom` threads whose model is no longer in the catalog;
+        // otherwise resume / direct mode keeps sending the previous model.
+        with_test_home(|state, _| {
+            let codex_dir = crate::codex_config::get_codex_config_dir();
+            let state_db = codex_dir.join(crate::codex_state_db::CODEX_STATE_DB_FILENAME);
+            std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+            {
+                let conn = rusqlite::Connection::open(&state_db).expect("open state db");
+                conn.execute_batch(
+                    "CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        model_provider TEXT NOT NULL,
+                        model TEXT
+                    );",
+                )
+                .expect("create threads table");
+                conn.execute(
+                    "INSERT INTO threads (id, model_provider, model) VALUES ('t1', 'custom', 'gpt-5.6-luna')",
+                    [],
+                )
+                .expect("insert stale custom thread");
+                conn.execute(
+                    "INSERT INTO threads (id, model_provider, model) VALUES ('t2', 'openai', 'gpt-5.6-luna')",
+                    [],
+                )
+                .expect("insert official bucket thread");
+            }
+
+            let provider = Provider::with_id(
+                "codex-update-current-model".to_string(),
+                "Current provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-old-current" },
+                    "model": "gpt-5.6-luna",
+                    "modelCatalog": {
+                        "models": [{ "model": "gpt-5.6-luna" }]
+                    },
+                    "config": r#"model_provider = "custom"
+model = "gpt-5.6-luna"
+
+[model_providers.custom]
+name = "Old"
+base_url = "https://api.old.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed current provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &provider.id)
+                .expect("mark provider current");
+            write_live_with_common_config(state.db.as_ref(), &AppType::Codex, &provider)
+                .expect("seed live config");
+
+            let mut updated = provider.clone();
+            updated.settings_config = json!({
+                "auth": { "OPENAI_API_KEY": "sk-new-current" },
+                "model": "deepseek-v4-flash",
+                "modelCatalog": {
+                    "models": [{ "model": "deepseek-v4-flash" }]
+                },
+                "config": r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+
+[model_providers.custom]
+name = "DeepSeek"
+base_url = "https://api.new.example/v1"
+wire_api = "responses"
+"#
+            });
+            ProviderService::update(state, AppType::Codex, None, updated)
+                .expect("update current provider");
+
+            let conn = rusqlite::Connection::open(&state_db).expect("reopen state db");
+            let mut stmt = conn
+                .prepare("SELECT model_provider, model FROM threads ORDER BY id")
+                .expect("prepare query");
+            let rows: Vec<(String, Option<String>)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query rows")
+                .map(|row| row.expect("read row"))
+                .collect();
+            assert_eq!(
+                rows[0],
+                ("custom".to_string(), Some("deepseek-v4-flash".to_string())),
+                "stale custom thread must follow the saved provider's upstream model"
+            );
+            assert_eq!(
+                rows[1],
+                ("openai".to_string(), Some("gpt-5.6-luna".to_string())),
+                "official thread bucket must stay untouched"
+            );
+        });
+    }
+    #[test]
+    #[serial]
+    fn update_non_current_codex_provider_does_not_sync_thread_models() {
+        with_test_home(|state, _| {
+            let codex_dir = crate::codex_config::get_codex_config_dir();
+            let state_db = codex_dir.join(crate::codex_state_db::CODEX_STATE_DB_FILENAME);
+            std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+            {
+                let conn = rusqlite::Connection::open(&state_db).expect("open state db");
+                conn.execute_batch(
+                    "CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        model_provider TEXT NOT NULL,
+                        model TEXT
+                    );",
+                )
+                .expect("create threads table");
+                conn.execute(
+                    "INSERT INTO threads (id, model_provider, model) VALUES ('t1', 'custom', 'gpt-5.6-luna')",
+                    [],
+                )
+                .expect("insert custom thread");
+            }
+
+            let current = Provider::with_id(
+                "codex-live-owner".to_string(),
+                "Live owner".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-live-owner" },
+                    "model": "gpt-5.6-luna",
+                    "modelCatalog": {
+                        "models": [{ "model": "gpt-5.6-luna" }]
+                    },
+                    "config": r#"model_provider = "custom"
+model = "gpt-5.6-luna"
+
+[model_providers.custom]
+name = "Owner"
+base_url = "https://api.owner.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            );
+            let background = Provider::with_id(
+                "codex-background-edit".to_string(),
+                "Background provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-background-old" },
+                    "model": "deepseek-v4-flash",
+                    "modelCatalog": {
+                        "models": [{ "model": "deepseek-v4-flash" }]
+                    },
+                    "config": r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+
+[model_providers.custom]
+name = "Background"
+base_url = "https://api.background.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &current)
+                .expect("seed current provider");
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &background)
+                .expect("seed background provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &current.id)
+                .expect("mark live owner current");
+            write_live_with_common_config(state.db.as_ref(), &AppType::Codex, &current)
+                .expect("seed live config");
+
+            let mut updated = background.clone();
+            updated.settings_config = json!({
+                "auth": { "OPENAI_API_KEY": "sk-background-new" },
+                "model": "deepseek-v4-pro",
+                "modelCatalog": {
+                    "models": [{ "model": "deepseek-v4-pro" }]
+                },
+                "config": r#"model_provider = "custom"
+model = "deepseek-v4-pro"
+
+[model_providers.custom]
+name = "Background"
+base_url = "https://api.background-new.example/v1"
+wire_api = "responses"
+"#
+            });
+            ProviderService::update(state, AppType::Codex, None, updated)
+                .expect("update non-current provider");
+
+            let conn = rusqlite::Connection::open(&state_db).expect("reopen state db");
+            let model: Option<String> = conn
+                .query_row("SELECT model FROM threads WHERE id = 't1'", [], |row| {
+                    row.get(0)
+                })
+                .expect("read thread model");
+            assert_eq!(
+                model.as_deref(),
+                Some("gpt-5.6-luna"),
+                "editing a non-current provider must not rewrite live threads"
+            );
+        });
+    }
+    #[test]
+    #[serial]
+    fn add_first_codex_provider_syncs_stale_custom_thread_models() {
+        with_test_home(|state, _| {
+            let codex_dir = crate::codex_config::get_codex_config_dir();
+            let state_db = codex_dir.join(crate::codex_state_db::CODEX_STATE_DB_FILENAME);
+            std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+            {
+                let conn = rusqlite::Connection::open(&state_db).expect("open state db");
+                conn.execute_batch(
+                    "CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        model_provider TEXT NOT NULL,
+                        model TEXT
+                    );",
+                )
+                .expect("create threads table");
+                conn.execute(
+                    "INSERT INTO threads (id, model_provider, model) VALUES ('t1', 'custom', 'gpt-5.6-luna')",
+                    [],
+                )
+                .expect("insert stale custom thread");
+            }
+
+            let provider = Provider::with_id(
+                "codex-add-first".to_string(),
+                "First provider".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-first" },
+                    "model": "deepseek-v4-flash",
+                    "modelCatalog": {
+                        "models": [{ "model": "deepseek-v4-flash" }]
+                    },
+                    "config": r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+
+[model_providers.custom]
+name = "DeepSeek"
+base_url = "https://api.first.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            );
+            ProviderService::add(state, AppType::Codex, provider, false)
+                .expect("add first provider");
+
+            let conn = rusqlite::Connection::open(&state_db).expect("reopen state db");
+            let model: Option<String> = conn
+                .query_row("SELECT model FROM threads WHERE id = 't1'", [], |row| {
+                    row.get(0)
+                })
+                .expect("read thread model");
+            assert_eq!(
+                model.as_deref(),
+                Some("deepseek-v4-flash"),
+                "adding the first current provider must rewrite stale custom threads"
+            );
+        });
+    }
+    #[test]
+    #[serial]
+    fn sync_current_to_live_syncs_stale_custom_thread_models() {
+        with_test_home(|state, _| {
+            let codex_dir = crate::codex_config::get_codex_config_dir();
+            let state_db = codex_dir.join(crate::codex_state_db::CODEX_STATE_DB_FILENAME);
+            std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+            {
+                let conn = rusqlite::Connection::open(&state_db).expect("open state db");
+                conn.execute_batch(
+                    "CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        model_provider TEXT NOT NULL,
+                        model TEXT
+                    );",
+                )
+                .expect("create threads table");
+                conn.execute(
+                    "INSERT INTO threads (id, model_provider, model) VALUES ('t1', 'custom', 'gpt-5.6-luna')",
+                    [],
+                )
+                .expect("insert stale custom thread");
+            }
+
+            let provider = Provider::with_id(
+                "codex-import-current".to_string(),
+                "Imported current".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-imported" },
+                    "model": "deepseek-v4-flash",
+                    "modelCatalog": {
+                        "models": [{ "model": "deepseek-v4-flash" }]
+                    },
+                    "config": r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+
+[model_providers.custom]
+name = "DeepSeek"
+base_url = "https://api.imported.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed current provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &provider.id)
+                .expect("mark provider current");
+
+            ProviderService::sync_current_to_live(state).expect("sync current to live");
+
+            let conn = rusqlite::Connection::open(&state_db).expect("reopen state db");
+            let model: Option<String> = conn
+                .query_row("SELECT model FROM threads WHERE id = 't1'", [], |row| {
+                    row.get(0)
+                })
+                .expect("read thread model");
+            assert_eq!(
+                model.as_deref(),
+                Some("deepseek-v4-flash"),
+                "import/cloud sync of the current provider must rewrite stale custom threads"
+            );
+        });
+    }
+    #[test]
+    #[serial]
+    fn update_codex_provider_resets_health_when_url_or_key_changes() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "codex-repair-endpoint".to_string(),
+                "Broken provider".to_string(),
+                codex_settings("https://api.old.example/v1", "sk-old"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed provider");
+            futures::executor::block_on(async {
+                for _ in 0..5 {
+                    state
+                        .db
+                        .update_provider_health(
+                            &provider.id,
+                            AppType::Codex.as_str(),
+                            false,
+                            Some("401".to_string()),
+                        )
+                        .await
+                        .expect("record failure");
+                }
+            });
+            let before = futures::executor::block_on(
+                state
+                    .db
+                    .get_provider_health(&provider.id, AppType::Codex.as_str()),
+            )
+            .expect("read health");
+            assert!(!before.is_healthy);
+            assert!(before.consecutive_failures >= 5);
+
+            let mut updated = provider.clone();
+            updated.settings_config = codex_settings("https://api.new.example/v1", "sk-old");
+            ProviderService::update(state, AppType::Codex, None, updated)
+                .expect("update provider url");
+
+            let after = futures::executor::block_on(
+                state
+                    .db
+                    .get_provider_health(&provider.id, AppType::Codex.as_str()),
+            )
+            .expect("read health after url change");
+            assert!(after.is_healthy);
+            assert_eq!(after.consecutive_failures, 0);
+        });
+    }
+    #[test]
+    #[serial]
+    fn update_codex_provider_does_not_reset_health_on_name_only_save() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "codex-rename-only".to_string(),
+                "Old name".to_string(),
+                codex_settings("https://api.same.example/v1", "sk-same"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed provider");
+            futures::executor::block_on(async {
+                for _ in 0..5 {
+                    state
+                        .db
+                        .update_provider_health(
+                            &provider.id,
+                            AppType::Codex.as_str(),
+                            false,
+                            Some("timeout".to_string()),
+                        )
+                        .await
+                        .expect("record failure");
+                }
+            });
+
+            let mut updated = provider.clone();
+            updated.name = "New name".to_string();
+            ProviderService::update(state, AppType::Codex, None, updated).expect("rename provider");
+
+            let after = futures::executor::block_on(
+                state
+                    .db
+                    .get_provider_health(&provider.id, AppType::Codex.as_str()),
+            )
+            .expect("read health after rename");
+            assert!(
+                !after.is_healthy,
+                "name-only saves must not clear a recorded circuit-open state"
+            );
         });
     }
     #[test]
@@ -997,6 +1423,12 @@ impl ProviderService {
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
             write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            if matches!(app_type, AppType::Codex) {
+                crate::codex_state_db::sync_and_log_stale_custom_thread_models_from_live(
+                    &provider,
+                    "添加当前供应商后",
+                );
+            }
         }
 
         Ok(true)
@@ -1012,7 +1444,7 @@ impl ProviderService {
         let mut provider = provider;
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
         let provider_id_changed = original_id != provider.id;
-        let _existing_provider = state
+        let existing_provider = state
             .db
             .get_provider_by_id(&original_id, app_type.as_str())?;
         Self::validate_provider_settings(&app_type, &provider)?;
@@ -1026,8 +1458,46 @@ impl ProviderService {
             ));
         }
 
+        let endpoint_changed = existing_provider
+            .as_ref()
+            .is_some_and(|existing| Self::provider_endpoint_changed(existing, &provider));
+
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
+
+        if matches!(app_type, AppType::Codex) {
+            if let Err(err) = crate::codex_subagent_providers::sync_linked_subagents_from_provider(
+                &crate::codex_config::get_codex_config_dir(),
+                &provider,
+            ) {
+                log::warn!(
+                    "保存供应商后同步绑定 subagent 上游失败 ({}): {err}",
+                    provider.id
+                );
+            }
+        }
+
+        if endpoint_changed {
+            // Reset health/breaker for this id after a URL/key repair. Do not
+            // auto-switch failover back to this provider — that is only the
+            // manual reset-circuit-breaker command.
+            futures::executor::block_on(async {
+                if let Err(err) = state
+                    .db
+                    .update_provider_health(&provider.id, app_type.as_str(), true, None)
+                    .await
+                {
+                    log::warn!("保存供应商后重置健康状态失败: {err}");
+                }
+                if let Err(err) = state
+                    .proxy_service
+                    .reset_provider_circuit_breaker(&provider.id, app_type.as_str())
+                    .await
+                {
+                    log::warn!("保存供应商后重置熔断器失败: {err}");
+                }
+            });
+        }
 
         // For other apps: Check if this is current provider (use effective current, not just DB)
         let effective_current =
@@ -1076,20 +1546,102 @@ impl ProviderService {
                 }
             } else {
                 write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
-                // 重写 live 后只重投影本应用的 MCP：全量 sync_all_enabled 会把
-                // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）牵连进保存
-                // 流程。走到这里 DB 与 live 都已按新配置落盘，保存事实上已
-                // 成功；投影失败降级为警告，避免制造"保存失败"假象（MCP
-                // 投影可自愈：下次切换 / 任一 MCP 启停都会重新投影）。
-                if let Err(err) = McpService::sync_enabled_for_app(state, &app_type) {
-                    log::warn!(
-                        "保存供应商后重投影 {app_type:?} MCP 失败（将在下次同步时自愈）: {err}"
-                    );
-                }
             }
+
+            // Live/backup write succeeded. Rewrite stale `custom` thread models
+            // the same way switch and hot-switch already do, so in-place
+            // model/catalog edits cannot leave resume (especially direct mode)
+            // sending the previous provider's model.
+            if matches!(app_type, AppType::Codex) {
+                crate::codex_state_db::sync_and_log_stale_custom_thread_models_from_live(
+                    &provider,
+                    "保存当前供应商后",
+                );
+            }
+        } else if matches!(app_type, AppType::Codex) {
+            Self::reproject_current_aggregate_after_member_update(state, &provider.id);
         }
 
         Ok(true)
+    }
+
+    fn provider_endpoint_credentials(provider: &Provider) -> (Option<String>, Option<String>) {
+        let auth = provider.settings_config.get("auth");
+        let config = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str);
+        let api_key = crate::codex_config::extract_codex_api_key(auth, config);
+        let base_url = config
+            .and_then(crate::codex_config::extract_codex_base_url)
+            .or_else(|| {
+                provider
+                    .settings_config
+                    .get("base_url")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty());
+        (api_key, base_url)
+    }
+
+    fn provider_endpoint_changed(existing: &Provider, updated: &Provider) -> bool {
+        Self::provider_endpoint_credentials(existing)
+            != Self::provider_endpoint_credentials(updated)
+    }
+
+    /// Updating a member of the current aggregate must reproject the takeover
+    /// catalog / models_cache, matching the delete-member path. URL/key edits
+    /// are read from DB per request; catalog slots are not.
+    fn reproject_current_aggregate_after_member_update(state: &AppState, member_id: &str) {
+        let Ok(current_id) =
+            crate::settings::get_effective_current_provider(state.db.as_ref(), &AppType::Codex)
+        else {
+            return;
+        };
+        let Some(current_id) = current_id else {
+            return;
+        };
+        let Ok(Some(aggregate)) = state.db.get_provider_by_id(&current_id, "codex") else {
+            return;
+        };
+        if !aggregate.is_aggregate() {
+            return;
+        }
+        let is_member = aggregate
+            .settings_config
+            .get("memberProviderIds")
+            .and_then(|value| value.as_array())
+            .is_some_and(|ids| {
+                ids.iter()
+                    .any(|id| id.as_str().is_some_and(|id| id == member_id))
+            });
+        if !is_member {
+            return;
+        }
+
+        let has_live_backup = futures::executor::block_on(state.db.get_live_backup("codex"))
+            .ok()
+            .flatten()
+            .is_some();
+        let live_taken_over = state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(&AppType::Codex);
+        if !has_live_backup && !live_taken_over {
+            return;
+        }
+        if !futures::executor::block_on(state.proxy_service.is_running()) {
+            return;
+        }
+
+        if let Err(error) = futures::executor::block_on(
+            state
+                .proxy_service
+                .sync_codex_live_from_provider_while_proxy_active(&aggregate),
+        ) {
+            log::warn!("更新 Codex 聚合成员后重投影当前聚合目录失败（下次接管会重试）: {error}");
+        }
     }
 
     /// Delete a provider
@@ -1238,6 +1790,12 @@ impl ProviderService {
         let changed_aggregate_ids = state
             .db
             .delete_codex_provider_and_prune_aggregate_references(id)?;
+        if let Err(err) = crate::codex_subagent_providers::unbind_cube_provider(
+            &crate::codex_config::get_codex_config_dir(),
+            id,
+        ) {
+            log::warn!("删除供应商后解绑 subagent Cube ID 失败 ({id}): {err}");
+        }
         futures::executor::block_on(
             state
                 .proxy_service
@@ -1509,17 +2067,6 @@ impl ProviderService {
             }
         }
 
-        // 切换重写了目标应用的 live，只重投影该应用的 MCP（Codex 的
-        // [mcp_servers] 与 live 同文件，整体替换后必须补回；其余应用的
-        // MCP 文件独立于 live，投影是幂等维护）。不用全量 sync_all_enabled：
-        // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）不该阻断切换。
-        // 走到这里 DB is_current 与 live 都已落盘，切换事实上已成功；
-        // 投影失败上抛会让前端报"切换失败"制造分裂假象，故降级为警告
-        // （MCP 投影可自愈：下次切换 / 任一 MCP 启停都会重新投影）。
-        if let Err(err) = McpService::sync_enabled_for_app(state, &app_type) {
-            log::warn!("切换供应商后重投影 {app_type:?} MCP 失败（将在下次同步时自愈）: {err}");
-        }
-
         Ok(result)
     }
 
@@ -1566,6 +2113,12 @@ impl ProviderService {
                     .update_live_backup_from_provider(app_type.as_str(), provider),
             )
             .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+            if matches!(app_type, AppType::Codex) {
+                crate::codex_state_db::sync_and_log_stale_custom_thread_models_from_live(
+                    provider,
+                    "同步当前供应商到 Live 备份后",
+                );
+            }
             return Ok(());
         }
 
@@ -1876,13 +2429,9 @@ impl ProviderService {
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
 
-        // MCP 服务器归 DB mcp_servers 表所有：进了共享片段会绕过按应用的
-        // 启用状态被合并进所有勾选通用配置的供应商，且在通用配置编辑框里
-        // 显示为一份"重复"的 MCP 配置。
+        // MCP servers belong to Codex live config.toml, not Cube common config.
         root.remove("mcp_servers");
-        // 历史错误格式 [mcp.servers] 一并剥离（与 strip_codex_mcp_servers_from_settings
-        // 一致）：sync_all_enabled 只管理 [mcp_servers.*]，legacy 形态一旦进了
-        // 片段就会被合并进所有供应商，且没有任何同步路径能清掉这个孤儿。
+        // 历史错误格式 [mcp.servers] 一并剥离，避免进入所有供应商的共享片段。
         if let Some(mcp_tbl) = root
             .get_mut("mcp")
             .and_then(|item| item.as_table_like_mut())

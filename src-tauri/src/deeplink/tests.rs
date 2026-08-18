@@ -1,59 +1,11 @@
 //! Deep link module tests
 
-use super::mcp::parse_mcp_apps;
 use super::parser::parse_deeplink_url;
-use super::prompt::import_prompt_from_deeplink;
 use super::provider::parse_and_merge_config;
 use super::utils::{infer_homepage_from_endpoint, validate_url};
 use super::DeepLinkImportRequest;
 use crate::AppType;
-use crate::{store::AppState, Database};
 use base64::prelude::*;
-use std::{env, ffi::OsString, sync::Arc};
-
-struct TestHomeGuard {
-    _dir: tempfile::TempDir,
-    original_home: Option<OsString>,
-    original_userprofile: Option<OsString>,
-    original_test_home: Option<OsString>,
-}
-
-impl TestHomeGuard {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().expect("create isolated test home");
-        let original_home = env::var_os("HOME");
-        let original_userprofile = env::var_os("USERPROFILE");
-        let original_test_home = env::var_os("CODEX_CUBE_TEST_HOME");
-
-        env::set_var("HOME", dir.path());
-        env::set_var("USERPROFILE", dir.path());
-        env::set_var("CODEX_CUBE_TEST_HOME", dir.path());
-
-        Self {
-            _dir: dir,
-            original_home,
-            original_userprofile,
-            original_test_home,
-        }
-    }
-}
-
-impl Drop for TestHomeGuard {
-    fn drop(&mut self) {
-        match &self.original_test_home {
-            Some(value) => env::set_var("CODEX_CUBE_TEST_HOME", value),
-            None => env::remove_var("CODEX_CUBE_TEST_HOME"),
-        }
-        match &self.original_userprofile {
-            Some(value) => env::set_var("USERPROFILE", value),
-            None => env::remove_var("USERPROFILE"),
-        }
-        match &self.original_home {
-            Some(value) => env::set_var("HOME", value),
-            None => env::remove_var("HOME"),
-        }
-    }
-}
 
 // =============================================================================
 // Parser Tests
@@ -86,7 +38,6 @@ fn test_parse_ccswitch_alias_scheme() {
     assert_eq!(request.api_key, Some("sk-relay-test".to_string()));
 }
 
-#[test]
 #[test]
 fn test_parse_invalid_scheme() {
     let url = "https://v1/import?resource=provider&app=codex&name=Test";
@@ -161,8 +112,6 @@ fn test_infer_homepage() {
 // Provider Tests
 // =============================================================================
 
-#[test]
-#[test]
 #[test]
 fn test_deeplink_usage_script_does_not_copy_provider_credentials() {
     use super::provider::build_provider_from_request;
@@ -393,7 +342,6 @@ fn test_deeplink_usage_script_preserves_distinct_usage_credentials() {
 }
 
 #[test]
-#[test]
 fn test_parse_and_merge_config_codex_uses_bearer_token() {
     let config_toml = r#"model_provider = "rightcode"
 model = "gpt-5-codex"
@@ -480,89 +428,7 @@ fn test_parse_and_merge_config_url_override() {
     assert_eq!(merged.endpoint, Some("https://old.example/v1".to_string()));
 }
 
-#[test]
-#[test]
-#[test]
-#[serial_test::serial]
-fn test_import_prompt_allows_space_in_base64_content() {
-    let _test_home = TestHomeGuard::new();
-    let url = "codexcube://v1/import?resource=prompt&app=codex&name=PromptPlus&content=Pj4+";
-    let request = parse_deeplink_url(url).unwrap();
 
-    // URL decoded content may have "+" become space
-    assert_eq!(request.content.as_deref(), Some("Pj4 "));
-
-    let db = Arc::new(Database::memory().expect("create memory db"));
-    let state = AppState::new(db.clone());
-
-    let prompt_id = import_prompt_from_deeplink(&state, request.clone()).expect("import prompt");
-
-    let prompts = state.db.get_prompts("codex").expect("get prompts");
-    let prompt = prompts.get(&prompt_id).expect("prompt saved");
-
-    assert_eq!(prompt.content, ">>>");
-    assert_eq!(prompt.name, request.name.unwrap());
-}
-
-// =============================================================================
-// MCP Tests
-// =============================================================================
-
-#[test]
-fn test_parse_mcp_apps() {
-    let apps = parse_mcp_apps("codex").unwrap();
-    assert!(apps.codex);
-
-    let err = parse_mcp_apps("invalid").unwrap_err();
-    assert!(err.to_string().contains("Invalid app"));
-}
-
-#[test]
-fn test_parse_prompt_deeplink() {
-    let content = "Hello World";
-    let content_b64 = BASE64_STANDARD.encode(content);
-    let url = format!(
-        "codexcube://v1/import?resource=prompt&app=codex&name=test&content={}&description=desc&enabled=true",
-        content_b64
-    );
-
-    let request = parse_deeplink_url(&url).unwrap();
-    assert_eq!(request.resource, "prompt");
-    assert_eq!(request.app.unwrap(), "codex");
-    assert_eq!(request.name.unwrap(), "test");
-    assert_eq!(request.content.unwrap(), content_b64);
-    assert_eq!(request.description.unwrap(), "desc");
-    assert!(request.enabled.unwrap());
-}
-
-#[test]
-#[test]
-fn test_parse_mcp_deeplink() {
-    let config = r#"{"mcpServers":{"test":{"command":"echo"}}}"#;
-    let config_b64 = BASE64_STANDARD.encode(config);
-    let url = format!(
-        "codexcube://v1/import?resource=mcp&apps=codex&config={}&enabled=true",
-        config_b64
-    );
-
-    let request = parse_deeplink_url(&url).unwrap();
-    assert_eq!(request.resource, "mcp");
-    assert_eq!(request.apps.unwrap(), "codex");
-    assert_eq!(request.config.unwrap(), config_b64);
-    assert!(request.enabled.unwrap());
-}
-
-#[test]
-#[test]
-fn test_parse_skill_deeplink() {
-    let url = "codexcube://v1/import?resource=skill&repo=owner/repo&directory=skills&branch=dev";
-    let request = parse_deeplink_url(url).unwrap();
-
-    assert_eq!(request.resource, "skill");
-    assert_eq!(request.repo.unwrap(), "owner/repo");
-    assert_eq!(request.directory.unwrap(), "skills");
-    assert_eq!(request.branch.unwrap(), "dev");
-}
 
 // =============================================================================
 // Multiple Endpoints Tests

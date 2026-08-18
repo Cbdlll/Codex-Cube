@@ -21,7 +21,7 @@ use super::{
             responses_sse_events_from_anthropic_message,
         },
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
-        transform, transform_codex_anthropic, transform_codex_chat,
+        transform_codex_anthropic, transform_codex_chat,
         transform_codex_responses_namespace,
     },
     response_processor::{
@@ -39,8 +39,10 @@ use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 // ============================================================================
 // 健康检查和状态查询（简单端点）
@@ -306,6 +308,7 @@ async fn handle_responses_for_app(
             is_stream,
             connection_guard,
             codex_tool_context,
+            has_collaboration_message_tools,
         )
         .await;
     }
@@ -318,17 +321,17 @@ async fn handle_responses_for_app(
             is_stream,
             connection_guard,
             codex_tool_context,
+            has_collaboration_message_tools,
         )
         .await;
     }
 
-    // Native Responses passthrough to a strict gateway (xAI): the request-side
-    // flatten (in the forwarder) turned Codex `namespace` tools into flat
-    // function tools, so the upstream returns flat function-call names. Restore
-    // them to `{name, namespace}` so the Codex client matches them against its
-    // namespaced tool registry.
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-        && (!namespace_restore_map.is_empty() || has_collaboration_message_tools)
+    // Native Responses passthrough: restore flattened namespace tool names for
+    // strict gateways, and rewrite cube-dispatch `spawn_agent` arguments so a
+    // generic `worker` spawn cannot inherit `[agents]` defaults.
+    let flatten_namespaces =
+        super::providers::provider_needs_responses_namespace_flatten(&ctx.provider);
+    if has_collaboration_message_tools || (flatten_namespaces && !namespace_restore_map.is_empty())
     {
         return handle_codex_responses_namespace_restore(
             response,
@@ -336,6 +339,7 @@ async fn handle_responses_for_app(
             &state,
             connection_guard,
             namespace_restore_map,
+            flatten_namespaces && has_collaboration_message_tools,
             has_collaboration_message_tools,
         )
         .await;
@@ -349,6 +353,28 @@ async fn handle_responses_for_app(
         connection_guard,
     )
     .await
+}
+
+fn maybe_rewrite_spawn_agent_sse<S, E>(
+    stream: S,
+    enabled: bool,
+) -> std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::error::Error + Send + 'static,
+{
+    if enabled {
+        Box::pin(
+            transform_codex_responses_namespace::create_namespace_restore_sse_stream(
+                stream,
+                HashMap::new(),
+                false,
+                true,
+            ),
+        )
+    } else {
+        Box::pin(stream.map(|item| item.map_err(|error| std::io::Error::other(error.to_string()))))
+    }
 }
 
 /// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）
@@ -430,6 +456,7 @@ async fn handle_responses_compact_for_app(
             is_stream,
             connection_guard,
             codex_tool_context,
+            has_collaboration_message_tools,
         )
         .await;
     }
@@ -442,12 +469,17 @@ async fn handle_responses_compact_for_app(
             is_stream,
             connection_guard,
             codex_tool_context,
+            has_collaboration_message_tools,
         )
         .await;
     }
 
-    if super::providers::provider_needs_responses_namespace_flatten(&ctx.provider)
-        && (!namespace_restore_map.is_empty() || has_collaboration_message_tools)
+    // Native Responses passthrough: restore flattened namespace tool names for
+    // strict gateways, and rewrite cube-dispatch `spawn_agent` arguments so a
+    // generic `worker` spawn cannot inherit `[agents]` defaults.
+    let flatten_namespaces =
+        super::providers::provider_needs_responses_namespace_flatten(&ctx.provider);
+    if has_collaboration_message_tools || (flatten_namespaces && !namespace_restore_map.is_empty())
     {
         return handle_codex_responses_namespace_restore(
             response,
@@ -455,6 +487,7 @@ async fn handle_responses_compact_for_app(
             &state,
             connection_guard,
             namespace_restore_map,
+            flatten_namespaces && has_collaboration_message_tools,
             has_collaboration_message_tools,
         )
         .await;
@@ -485,6 +518,7 @@ async fn handle_codex_responses_namespace_restore(
         transform_codex_responses_namespace::NamespacedName,
     >,
     mark_collaboration_plaintext: bool,
+    rewrite_spawn_agent: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
 
@@ -510,6 +544,7 @@ async fn handle_codex_responses_namespace_restore(
                 response.bytes_stream(),
                 restore_map,
                 mark_collaboration_plaintext,
+                rewrite_spawn_agent,
             );
         let usage_collector =
             create_usage_collector(ctx, state, status.as_u16(), &CODEX_PARSER_CONFIG);
@@ -553,6 +588,11 @@ async fn handle_codex_responses_namespace_restore(
                 &mut value,
                 &restore_map,
             );
+            if rewrite_spawn_agent {
+                super::providers::transform_codex_spawn_agent::rewrite_spawn_agent_value(
+                    &mut value,
+                );
+            }
             if let Some(usage) =
                 TokenUsage::from_codex_response_auto(&value).filter(TokenUsage::has_billable_tokens)
             {
@@ -630,6 +670,7 @@ async fn handle_codex_chat_to_responses_transform(
     is_stream: bool,
     connection_guard: Option<ActiveConnectionGuard>,
     tool_context: transform_codex_chat::CodexToolContext,
+    rewrite_spawn_agent: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
 
@@ -644,6 +685,7 @@ async fn handle_codex_chat_to_responses_transform(
         let stream = response.bytes_stream();
         let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
+        let sse_stream = maybe_rewrite_spawn_agent_sse(sse_stream, rewrite_spawn_agent);
 
         let usage_collector = if usage_logging_enabled(state) {
             let state = state.clone();
@@ -769,7 +811,7 @@ async fn handle_codex_chat_to_responses_transform(
             ));
         }
     };
-    let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
+    let mut responses_response = transform_codex_chat::chat_completion_to_response_with_context(
         chat_response,
         &tool_context,
     )
@@ -777,6 +819,11 @@ async fn handle_codex_chat_to_responses_transform(
         log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
         e
     })?;
+    if rewrite_spawn_agent {
+        super::providers::transform_codex_spawn_agent::rewrite_spawn_agent_value(
+            &mut responses_response,
+        );
+    }
     state
         .codex_chat_history
         .record_response(&responses_response)
@@ -869,6 +916,7 @@ async fn handle_codex_anthropic_to_responses_transform(
     is_stream: bool,
     connection_guard: Option<ActiveConnectionGuard>,
     codex_tool_context: transform_codex_chat::CodexToolContext,
+    rewrite_spawn_agent: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
 
@@ -883,6 +931,7 @@ async fn handle_codex_anthropic_to_responses_transform(
         let stream = response.bytes_stream();
         let sse_stream =
             create_responses_sse_stream_from_anthropic_with_context(stream, codex_tool_context);
+        let sse_stream = maybe_rewrite_spawn_agent_sse(sse_stream, rewrite_spawn_agent);
         return build_codex_anthropic_sse_response(
             sse_stream,
             ctx,
@@ -931,6 +980,7 @@ async fn handle_codex_anthropic_to_responses_transform(
         let events =
             responses_sse_events_from_anthropic_message(&anthropic_response, codex_tool_context);
         let sse_stream = futures::stream::iter(events.into_iter().map(Ok::<Bytes, std::io::Error>));
+        let sse_stream = maybe_rewrite_spawn_agent_sse(sse_stream, rewrite_spawn_agent);
         return build_codex_anthropic_sse_response(
             sse_stream,
             ctx,
@@ -941,7 +991,7 @@ async fn handle_codex_anthropic_to_responses_transform(
     }
 
     let _connection_guard = connection_guard;
-    let responses_response =
+    let mut responses_response =
         transform_codex_anthropic::anthropic_response_to_responses_with_context(
             anthropic_response,
             &codex_tool_context,
@@ -950,6 +1000,11 @@ async fn handle_codex_anthropic_to_responses_transform(
             log::error!("[Codex] Failed to convert Anthropic response to Responses: {e}");
             e
         })?;
+    if rewrite_spawn_agent {
+        super::providers::transform_codex_spawn_agent::rewrite_spawn_agent_value(
+            &mut responses_response,
+        );
+    }
 
     if let Some(usage) = TokenUsage::from_codex_response_auto(&responses_response)
         .filter(TokenUsage::has_billable_tokens)
@@ -2057,8 +2112,8 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
-        codex_proxy_error_json, responses_sse_to_response_value, transform,
-        upstream_body_parse_error, ProxyState, RequestContext,
+        codex_proxy_error_json, responses_sse_to_response_value, upstream_body_parse_error,
+        ProxyState, RequestContext,
     };
     use crate::database::Database;
     use crate::proxy::ProxyError;
@@ -2642,25 +2697,6 @@ data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\
         assert_eq!(response["id"], "resp_ok");
     }
 
-    #[test]
-    fn aggregated_chat_sse_round_trips_through_openai_to_anthropic() {
-        // 全链路：错标 Content-Type 的 SSE 体 → 聚合 → 既有非流转换器 → Anthropic JSON
-        let sse = "data: {\"id\":\"chatcmpl-9\",\"created\":1,\"model\":\"gpt-5.4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n\
-data: {\"id\":\"chatcmpl-9\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}\n\n\
-data: [DONE]\n\n";
-
-        let aggregated = chat_sse_to_response_value(sse).unwrap();
-        let anthropic = transform::openai_to_anthropic(aggregated).unwrap();
-
-        assert_eq!(anthropic["model"], "gpt-5.4");
-        assert_eq!(anthropic["content"][0]["type"], "text");
-        assert_eq!(anthropic["content"][0]["text"], "Hi");
-        assert_eq!(anthropic["stop_reason"], "end_turn");
-    }
-
-    #[test]
-    #[test]
-    #[test]
     #[test]
     fn responses_sse_to_response_value_collects_output_items() {
         let sse = r#"event: response.output_item.done

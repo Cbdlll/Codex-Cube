@@ -1134,7 +1134,8 @@ function SubagentFormDialog({
   const [modelProviderId, setModelProviderId] = useState("");
   const [modelBaseUrl, setModelBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  /** 复用 Provider 时从其配置读取的 key：仅用于拉模型，不进入保存 payload。 */
+  /** 复用 Provider 时从其配置读取的 key：保存时写入独立 key 文件，
+   * 同时把该 Cube 供应商的真实 ID 作为 cubeProviderId 交给后端绑定。 */
   const [reuseApiKey, setReuseApiKey] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("high");
   const [modelCandidates, setModelCandidates] = useState<
@@ -1279,6 +1280,10 @@ function SubagentFormDialog({
       : deriveSubagentProviderId(trimmedName);
     const keyForSave =
       !editing && source === "reuse" ? reuseApiKey.trim() : apiKey.trim();
+    const cubeProviderId =
+      !editing && source === "reuse"
+        ? selectedProviderId.trim()
+        : (editing?.cubeProviderId ?? "").trim();
     if (!trimmedName || !model.trim() || !providerId || !modelBaseUrl.trim()) {
       setFormError(
         t("agents.requiredFieldsMissing", {
@@ -1311,6 +1316,7 @@ function SubagentFormDialog({
         reasoningEffort,
         // 自定义 subagent 仅支持 Responses 协议。
         wireApi: "responses",
+        ...(cubeProviderId ? { cubeProviderId } : {}),
       });
       toast.success(
         t("agents.subagentSaved", { defaultValue: "Subagent saved" }),
