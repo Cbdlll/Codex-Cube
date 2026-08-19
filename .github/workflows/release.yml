@@ -57,6 +57,7 @@ jobs:
           releaseBody: |
             1.0.1
 
+            - Honor the selected Codex thread model after a Desktop fork when the first request still carries the parent model
             - Fix cube-dispatch spawn routing so registered workers use their bound provider and model
             - Refresh stale thread models after provider URL or API key changes
             - Remove unused MCP, Skills marketplace, WebDAV, and related UI copied from CC Switch

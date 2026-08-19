@@ -111,6 +111,125 @@ pub(crate) async fn effective_codex_aggregate_provider(
     persisted.filter(|provider| provider.is_aggregate())
 }
 
+/// Codex Desktop fork + model-picker: honor `state_5.sqlite` `threads.model`
+/// when the `/responses` body still carries the parent turn's model.
+pub(crate) async fn reconcile_codex_request_model_with_thread(
+    state: &ProxyState,
+    body: &mut serde_json::Value,
+    headers: &HeaderMap,
+) {
+    reconcile_codex_request_model_with_thread_using(
+        state,
+        body,
+        headers,
+        crate::codex_state_db::read_custom_thread_model,
+    )
+    .await;
+}
+
+async fn reconcile_codex_request_model_with_thread_using<F>(
+    state: &ProxyState,
+    body: &mut serde_json::Value,
+    headers: &HeaderMap,
+    read_thread_model: F,
+) where
+    F: Fn(&str) -> Option<String>,
+{
+    if headers.get("x-openai-subagent").is_some() {
+        return;
+    }
+    let Some(request_model) = body
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if crate::codex_agent_workflow::is_registered_dispatch_model(
+        &crate::codex_config::get_codex_config_dir(),
+        &request_model,
+    ) {
+        return;
+    }
+    let Some(thread_id) = crate::proxy::session::extract_codex_thread_id(headers, body) else {
+        return;
+    };
+    let Some(thread_model) = read_thread_model(&thread_id) else {
+        return;
+    };
+    let allowed = allowed_codex_thread_models(state).await;
+    let Some(preferred) = preferred_custom_thread_request_model(
+        &request_model,
+        &thread_model,
+        &allowed,
+        false,
+        false,
+    ) else {
+        return;
+    };
+    log::info!(
+        "[Codex] 线程 `{thread_id}` 已选择 `{preferred}`，覆盖请求中的过期模型 `{request_model}`"
+    );
+    body["model"] = serde_json::Value::String(preferred);
+}
+
+fn preferred_custom_thread_request_model(
+    request_model: &str,
+    thread_model: &str,
+    allowed_models: &[String],
+    request_is_dispatch_worker: bool,
+    is_subagent: bool,
+) -> Option<String> {
+    if is_subagent || request_is_dispatch_worker {
+        return None;
+    }
+    let request_model = request_model.trim();
+    let thread_model = thread_model.trim();
+    if request_model.is_empty() || thread_model.is_empty() || request_model == thread_model {
+        return None;
+    }
+    if allowed_models.is_empty() || !allowed_models.iter().any(|model| model == thread_model) {
+        return None;
+    }
+    Some(thread_model.to_string())
+}
+
+async fn allowed_codex_thread_models(state: &ProxyState) -> Vec<String> {
+    if let Some(aggregate) = effective_codex_aggregate_provider(state).await {
+        let mut ids = Vec::new();
+        for entry in crate::codex_config::codex_aggregate_model_entries(&aggregate.settings_config)
+        {
+            if !ids.iter().any(|model| model == &entry.model) {
+                ids.push(entry.model.clone());
+            }
+            if let Some(upstream) = entry.upstream_model {
+                if !ids.iter().any(|model| model == &upstream) {
+                    ids.push(upstream);
+                }
+            }
+        }
+        return ids;
+    }
+
+    let current = crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)
+        .ok()
+        .flatten()
+        .or_else(|| state.db.get_current_provider("codex").ok().flatten())
+        .and_then(|id| state.db.get_provider_by_id(&id, "codex").ok().flatten());
+    let Some(provider) = current else {
+        return Vec::new();
+    };
+    let mut ids = crate::codex_state_db::provider_catalog_model_ids(&provider);
+    if let Some(upstream) = crate::proxy::providers::codex_provider_upstream_model(&provider) {
+        if !ids.iter().any(|model| model == &upstream) {
+            ids.push(upstream);
+        }
+    }
+    ids
+}
+
 /// If a cube-dispatch child is talking to the coordinator's proxy with the
 /// registered worker model, send that request to the worker's Cube provider
 /// instead of rewriting the model onto the coordinator.
@@ -147,13 +266,7 @@ fn route_codex_dispatch_child_provider(
         .cube_provider_id
         .as_deref()
         .filter(|id| *id != provider.id)
-        .and_then(|id| {
-            state
-                .db
-                .get_provider_by_id(id, "codex")
-                .ok()
-                .flatten()
-        })
+        .and_then(|id| state.db.get_provider_by_id(id, "codex").ok().flatten())
         .filter(|found| found.id != provider.id)
         .or_else(|| {
             crate::codex_subagent_providers::match_existing_cube_provider(
@@ -1182,5 +1295,185 @@ mod tests {
             "after restart runtime refresh, aggregate routing must be active"
         );
         assert_eq!(ctx.get_providers().len(), 1);
+    }
+
+    #[test]
+    fn preferred_custom_thread_model_rewrites_stale_parent() {
+        let allowed = vec!["gpt-5.6-sol".to_string(), "kimi-k3".to_string()];
+        assert_eq!(
+            preferred_custom_thread_request_model("gpt-5.6-sol", "kimi-k3", &allowed, false, false)
+                .as_deref(),
+            Some("kimi-k3")
+        );
+        assert_eq!(
+            preferred_custom_thread_request_model("kimi-k3", "kimi-k3", &allowed, false, false),
+            None
+        );
+        assert_eq!(
+            preferred_custom_thread_request_model("gpt-5.6-sol", "kimi-k3", &allowed, true, false),
+            None,
+            "dispatch worker requests must keep the worker model"
+        );
+        assert_eq!(
+            preferred_custom_thread_request_model("gpt-5.6-sol", "kimi-k3", &allowed, false, true),
+            None,
+            "subagent requests must keep the child model"
+        );
+        assert_eq!(
+            preferred_custom_thread_request_model(
+                "gpt-5.6-sol",
+                "not-in-catalog",
+                &allowed,
+                false,
+                false
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn fork_thread_model_overrides_stale_parent_request_model() {
+        let _home = TempHome::new();
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+
+        let neko = Provider::with_id(
+            "neko".to_string(),
+            "Neko API".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-neko" },
+                "config": "base_url = \"https://neko.example/v1\"\nwire_api = \"responses\"",
+                "model": "gpt-5.6-sol"
+            }),
+            None,
+        );
+        db.save_provider("codex", &neko).expect("save neko");
+
+        let kimi = Provider::with_id(
+            "kimi".to_string(),
+            "Kimi".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-kimi" },
+                "config": "base_url = \"https://kimi.example/v1\"\nwire_api = \"responses\"",
+                "model": "kimi-k3"
+            }),
+            None,
+        );
+        db.save_provider("codex", &kimi).expect("save kimi");
+
+        let mut aggregate = Provider::with_id(
+            "agg-test".to_string(),
+            "My Aggregate".to_string(),
+            serde_json::json!({
+                "auth": {},
+                "config": "",
+                "aggregateModels": [
+                    {
+                        "model": "gpt-5.6-sol",
+                        "providerId": "neko",
+                        "upstreamModel": "gpt-5.6-sol"
+                    },
+                    {
+                        "model": "kimi-k3",
+                        "providerId": "kimi",
+                        "upstreamModel": "kimi-k3"
+                    }
+                ]
+            }),
+            None,
+        );
+        aggregate.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("aggregate".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &aggregate)
+            .expect("save aggregate");
+        db.set_current_provider("codex", "agg-test")
+            .expect("set current provider");
+
+        let state = build_state(db.clone());
+        let mut body = serde_json::json!({ "model": "gpt-5.6-sol", "input": "hi" });
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "thread-id",
+            "01a017fe-7519-7ce2-9c7e-872de1c2394c".parse().unwrap(),
+        );
+
+        reconcile_codex_request_model_with_thread_using(&state, &mut body, &headers, |thread_id| {
+            assert_eq!(thread_id, "01a017fe-7519-7ce2-9c7e-872de1c2394c");
+            Some("kimi-k3".to_string())
+        })
+        .await;
+
+        assert_eq!(body["model"].as_str(), Some("kimi-k3"));
+
+        let ctx = RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex")
+            .await
+            .expect("create context");
+        assert_eq!(ctx.provider.id, "kimi");
+        assert_eq!(ctx.request_model, "kimi-k3");
+        assert_eq!(ctx.provider.name, "Kimi");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn subagent_header_keeps_stale_request_model() {
+        let _home = TempHome::new();
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+
+        let neko = Provider::with_id(
+            "neko".to_string(),
+            "Neko API".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-neko" },
+                "config": "base_url = \"https://neko.example/v1\"\nwire_api = \"responses\"",
+                "model": "gpt-5.6-sol"
+            }),
+            None,
+        );
+        db.save_provider("codex", &neko).expect("save neko");
+
+        let mut aggregate = Provider::with_id(
+            "agg-test".to_string(),
+            "My Aggregate".to_string(),
+            serde_json::json!({
+                "auth": {},
+                "config": "",
+                "aggregateModels": [{
+                    "model": "gpt-5.6-sol",
+                    "providerId": "neko",
+                    "upstreamModel": "gpt-5.6-sol"
+                }, {
+                    "model": "kimi-k3",
+                    "providerId": "neko",
+                    "upstreamModel": "kimi-k3"
+                }]
+            }),
+            None,
+        );
+        aggregate.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("aggregate".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &aggregate)
+            .expect("save aggregate");
+        db.set_current_provider("codex", "agg-test")
+            .expect("set current provider");
+
+        let state = build_state(db.clone());
+        let mut body = serde_json::json!({ "model": "gpt-5.6-sol", "input": "hi" });
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "thread-id",
+            "01a017fe-7519-7ce2-9c7e-872de1c2394c".parse().unwrap(),
+        );
+        headers.insert("x-openai-subagent", "worker".parse().unwrap());
+
+        reconcile_codex_request_model_with_thread_using(&state, &mut body, &headers, |_| {
+            Some("kimi-k3".to_string())
+        })
+        .await;
+
+        assert_eq!(body["model"].as_str(), Some("gpt-5.6-sol"));
     }
 }

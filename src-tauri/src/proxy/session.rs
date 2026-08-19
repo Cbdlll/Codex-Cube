@@ -166,6 +166,55 @@ pub(super) fn parse_session_from_user_id(user_id: &str) -> Option<String> {
     None
 }
 
+/// Raw Codex thread id for looking up `state_5.sqlite` `threads.model`.
+///
+/// Unlike [`extract_session_id`], this does not invent a UUID and does not
+/// prefix `codex_`. Desktop sends the thread on `thread-id` / `conversation_id`
+/// / `session_id` after a fork, even when the `/responses` body still carries
+/// the parent turn's model.
+pub fn extract_codex_thread_id(headers: &HeaderMap, body: &serde_json::Value) -> Option<String> {
+    const HEADER_NAMES: &[&str] = &[
+        "thread-id",
+        "x-codex-thread-id",
+        "conversation_id",
+        "session_id",
+        "session-id",
+        "x-session-id",
+        "x-thread-id",
+    ];
+    for header_name in HEADER_NAMES {
+        if let Some(value) = headers
+            .get(*header_name)
+            .and_then(|value| value.to_str().ok())
+        {
+            if let Some(thread_id) = crate::codex_state_db::normalize_codex_thread_id(value) {
+                return Some(thread_id);
+            }
+        }
+    }
+
+    let metadata = body.get("metadata");
+    for key in ["session_id", "thread_id", "conversation_id"] {
+        if let Some(value) = metadata
+            .and_then(|metadata| metadata.get(key))
+            .and_then(|value| value.as_str())
+            .and_then(crate::codex_state_db::normalize_codex_thread_id)
+        {
+            return Some(value);
+        }
+    }
+    for key in ["conversation_id", "thread_id"] {
+        if let Some(value) = body
+            .get(key)
+            .and_then(|value| value.as_str())
+            .and_then(crate::codex_state_db::normalize_codex_thread_id)
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
 /// 生成新的 Session ID
 fn generate_new_session_id() -> SessionIdResult {
     SessionIdResult {
@@ -252,5 +301,37 @@ mod tests {
         // 没有 "_session_" 分隔符的情况
         assert_eq!(parse_session_from_user_id("user_john_abc123"), None);
         assert_eq!(parse_session_from_user_id("_session_"), None);
+    }
+
+    #[test]
+    fn extract_codex_thread_id_from_thread_id_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "thread-id",
+            "01a017fe-7519-7ce2-9c7e-872de1c2394c".parse().unwrap(),
+        );
+        let body = json!({ "model": "gpt-5.6-sol" });
+
+        assert_eq!(
+            extract_codex_thread_id(&headers, &body).as_deref(),
+            Some("01a017fe-7519-7ce2-9c7e-872de1c2394c")
+        );
+    }
+
+    #[test]
+    fn extract_codex_thread_id_strips_codex_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "session_id",
+            "codex_01a017fe-7519-7ce2-9c7e-872de1c2394c"
+                .parse()
+                .unwrap(),
+        );
+        let body = json!({});
+
+        assert_eq!(
+            extract_codex_thread_id(&headers, &body).as_deref(),
+            Some("01a017fe-7519-7ce2-9c7e-872de1c2394c")
+        );
     }
 }

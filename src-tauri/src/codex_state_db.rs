@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use toml_edit::DocumentMut;
 
 use crate::config::get_home_dir;
@@ -179,7 +179,7 @@ pub(crate) fn sync_and_log_stale_custom_thread_models_from_live(
 /// Model ids the provider's `modelCatalog` explicitly supports. Empty when the
 /// provider carries no catalog, in which case callers fall back to treating
 /// the configured upstream model as the only supported selection.
-fn provider_catalog_model_ids(provider: &Provider) -> Vec<String> {
+pub(crate) fn provider_catalog_model_ids(provider: &Provider) -> Vec<String> {
     provider
         .settings_config
         .get("modelCatalog")
@@ -235,6 +235,86 @@ fn sync_stale_custom_thread_models_in_db(
         .map_err(|e| format!("更新线程模型失败: {e}"))?;
     tx.commit().map_err(|e| format!("提交事务失败: {e}"))?;
     Ok(updated)
+}
+
+/// Read the current `custom` thread model from Codex state DBs.
+///
+/// Forked Desktop turns often keep the parent `turn_context.model` in the
+/// `/responses` body after the user picks a different model in the UI. The UI
+/// selection is stored here; JSONL is never modified.
+pub(crate) fn read_custom_thread_model(thread_id: &str) -> Option<String> {
+    let thread_id = normalize_codex_thread_id(thread_id)?;
+    read_custom_thread_model_from(
+        &thread_id,
+        &crate::codex_config::get_codex_config_dir(),
+        &crate::codex_config::read_codex_config_text().unwrap_or_default(),
+    )
+}
+
+pub(crate) fn normalize_codex_thread_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("codex_")
+        .or_else(|| trimmed.strip_prefix("codex-"))
+        .unwrap_or(trimmed)
+        .trim();
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
+
+fn read_custom_thread_model_from(
+    thread_id: &str,
+    config_dir: &Path,
+    config_text: &str,
+) -> Option<String> {
+    let thread_id = normalize_codex_thread_id(thread_id)?;
+    for db_path in codex_state_db_paths(config_dir, config_text) {
+        if !db_path.exists() {
+            continue;
+        }
+        match read_custom_thread_model_in_db(&db_path, &thread_id) {
+            Ok(Some(model)) => return Some(model),
+            Ok(None) => {}
+            Err(error) => log::debug!("读取 Codex 线程模型失败 {}: {error}", db_path.display()),
+        }
+    }
+    None
+}
+
+fn read_custom_thread_model_in_db(
+    db_path: &Path,
+    thread_id: &str,
+) -> Result<Option<String>, String> {
+    let conn = Connection::open(db_path).map_err(|e| format!("打开失败: {e}"))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
+    if !Database::table_exists(&conn, "threads").map_err(|e| format!("检查 threads 表失败: {e}"))?
+        || !Database::has_column(&conn, "threads", "model_provider")
+            .map_err(|e| format!("检查 model_provider 列失败: {e}"))?
+        || !Database::has_column(&conn, "threads", "model")
+            .map_err(|e| format!("检查 model 列失败: {e}"))?
+    {
+        return Ok(None);
+    }
+    let model: Option<String> = conn
+        .query_row(
+            "SELECT model FROM threads \
+             WHERE id = ?1 AND model_provider = 'custom' \
+             AND model IS NOT NULL AND trim(model) <> ''",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("查询线程模型失败: {e}"))?;
+    Ok(model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
 }
 
 #[cfg(test)]
@@ -479,6 +559,51 @@ mod tests {
         create_threads_db(&db_path, &[("custom", Some("gpt-5.6-luna"))]);
         let outcome = sync_stale_custom_thread_models(&aggregate, temp.path(), "");
         assert_eq!(outcome, CodexThreadModelSyncOutcome::default());
+    }
+
+    #[test]
+    fn read_custom_thread_model_returns_selected_model() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL,
+                model TEXT
+            );",
+        )
+        .expect("create threads table");
+        conn.execute(
+            "INSERT INTO threads (id, model_provider, model) VALUES (?1, ?2, ?3)",
+            params!["01a017fe-7519-7ce2-9c7e-872de1c2394c", "custom", "kimi-k3"],
+        )
+        .expect("insert custom thread");
+        conn.execute(
+            "INSERT INTO threads (id, model_provider, model) VALUES (?1, ?2, ?3)",
+            params!["openai-thread", "openai", "gpt-5.6-sol"],
+        )
+        .expect("insert openai thread");
+        drop(conn);
+
+        assert_eq!(
+            read_custom_thread_model_from("01a017fe-7519-7ce2-9c7e-872de1c2394c", temp.path(), "")
+                .as_deref(),
+            Some("kimi-k3")
+        );
+        assert_eq!(
+            read_custom_thread_model_from(
+                "codex_01a017fe-7519-7ce2-9c7e-872de1c2394c",
+                temp.path(),
+                ""
+            )
+            .as_deref(),
+            Some("kimi-k3")
+        );
+        assert_eq!(
+            read_custom_thread_model_from("openai-thread", temp.path(), ""),
+            None
+        );
     }
 
     #[test]
