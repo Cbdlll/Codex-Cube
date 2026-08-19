@@ -1417,6 +1417,19 @@ export const setCodexBaseUrl = (
 
 // ========== Codex model name utils ==========
 
+const findTopLevelModelAssignmentIndexes = (
+  lines: string[],
+  topLevelEndIndex: number,
+): number[] => {
+  const indexes: number[] = [];
+  for (let i = 0; i < topLevelEndIndex; i += 1) {
+    if (/^\s*model\s*=/.test(lines[i])) {
+      indexes.push(i);
+    }
+  }
+  return indexes;
+};
+
 // 顶层范围内第一个能被严格模式识别的 model 行；-1 表示没有
 const findTopLevelModelLineIndex = (
   lines: string[],
@@ -1465,12 +1478,15 @@ export const setCodexModelName = (
   const normalizedText = normalizeTomlText(configText);
   const lines = normalizedText ? normalizedText.split("\n") : [];
   const topLevelEndIndex = getTopLevelEndIndex(lines);
-  const modelLineIndex = findTopLevelModelLineIndex(lines, topLevelEndIndex);
+  const modelLineIndexes = findTopLevelModelAssignmentIndexes(
+    lines,
+    topLevelEndIndex,
+  );
 
   if (!trimmed) {
     if (!normalizedText) return normalizedText;
-    if (modelLineIndex !== -1) {
-      lines.splice(modelLineIndex, 1);
+    for (const index of [...modelLineIndexes].reverse()) {
+      lines.splice(index, 1);
     }
     return finalizeTomlText(lines);
   }
@@ -1478,8 +1494,12 @@ export const setCodexModelName = (
   // 模型名可能来自远端 /models 响应（下拉选择），必须转义——裸插值会让
   // 含引号/控制字符的 id 破坏甚至注入 config.toml（如伪造 [mcp_servers.*]）
   const replacementLine = `model = ${tomlBasicString(trimmed)}`;
-  if (modelLineIndex !== -1) {
-    lines[modelLineIndex] = replacementLine;
+  if (modelLineIndexes.length > 0) {
+    const [firstIndex, ...duplicateIndexes] = modelLineIndexes;
+    lines[firstIndex] = replacementLine;
+    for (const index of [...duplicateIndexes].reverse()) {
+      lines.splice(index, 1);
+    }
     return finalizeTomlText(lines);
   }
 

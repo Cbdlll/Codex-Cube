@@ -10,7 +10,8 @@ use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
 use crate::services::provider::{
-    build_effective_settings_with_common_config, write_live_with_common_config,
+    build_effective_settings_with_common_config, persist_aggregate_user_settings_from_live,
+    write_live_with_common_config,
 };
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
@@ -70,6 +71,9 @@ impl ProxyService {
         provider: &Provider,
     ) -> Result<(), String> {
         let existing_live = self.read_codex_live().ok();
+        // 调用方传入的 provider 是这次要投影到 Live 的 SSOT（例如刚保存的
+        // defaultModel / defaultReasoningEffort）。这里不能先用旧 Live 回写存储，
+        // 否则保存会被 Desktop 里尚未更新的 model / model_reasoning_effort 盖掉。
         let mut effective_settings = build_effective_settings_with_common_config(
             self.db.as_ref(),
             &AppType::Codex,
@@ -672,9 +676,20 @@ impl ProxyService {
                         if crate::proxy::providers::is_codex_official_provider(&provider) {
                             return Ok(());
                         }
-                        // 聚合 Provider 是虚拟供应商，不持有凭据：不要把 live 的
-                        // key 写进它的 settingsConfig。
+                        // 聚合 Provider 是虚拟供应商：不要把 live 的 key 写进
+                        // settingsConfig，但要把推理档位等用户设置写回存储，
+                        // 否则编辑页的 config.toml 会缺 model_reasoning_effort。
                         if provider.is_aggregate() {
+                            if let Err(error) = persist_aggregate_user_settings_from_live(
+                                self.db.as_ref(),
+                                &provider_id,
+                                live_config,
+                            ) {
+                                log::warn!(
+                                    "同步聚合 Provider '{}' 的用户设置失败: {error}",
+                                    provider_id
+                                );
+                            }
                             return Ok(());
                         }
 
@@ -1639,10 +1654,25 @@ impl ProxyService {
 
         let prepare_result: Result<(), String> = async {
             if should_sync_backup {
-                // 聚合 Provider 是虚拟供应商：没有自己的 config.toml。热切换时
-                // 保留接管开始时备份的原始 Live 配置，否则用空配置覆盖备份后，
-                // 用户在聚合 Provider 上直接关闭接管会恢复出一个空 config.toml，
-                // Codex 又会回落到 api.openai.com（残留 key → 401）。
+                if let Some(previous_id) = previous_provider_id.as_deref() {
+                    if previous_id != provider_id {
+                        if let Ok(live) = self.read_codex_live() {
+                            if let Err(error) = persist_aggregate_user_settings_from_live(
+                                self.db.as_ref(),
+                                previous_id,
+                                &live,
+                            ) {
+                                log::warn!(
+                                    "热切换前同步聚合 Provider '{previous_id}' 的用户设置失败: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
+                // 聚合 Provider 是虚拟供应商：没有自己的独立上游 config.toml。
+                // 热切换时保留接管开始时备份的原始 Live 配置，否则用空配置
+                // 覆盖备份后，用户在聚合 Provider 上直接关闭接管会恢复出一个
+                // 空 config.toml，Codex 又会回落到 api.openai.com。
                 if !provider.is_aggregate() {
                     self.update_live_backup_from_provider_inner(app_type, &provider)
                         .await?;
@@ -6431,5 +6461,118 @@ experimental_bearer_token = "PROXY_MANAGED"
             .find(|m| m["model"] == "deepseek-v4-flash")
             .expect("flash mapping");
         assert_eq!(flash_mapping["contextWindow"], 1048576);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn sync_aggregate_live_keeps_saved_default_model_and_reasoning() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let mut proxy_config = db.get_proxy_config().await.expect("get test proxy config");
+        proxy_config.listen_port = 15721;
+        db.update_proxy_config(proxy_config)
+            .await
+            .expect("set test proxy port");
+        let service = ProxyService::new(db.clone());
+        seed_codex_model_template();
+
+        let live_config = r#"model_provider = "custom"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+
+[model_providers.custom]
+name = "multi-provider"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#;
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "PROXY_MANAGED" }),
+            Some(live_config),
+        )
+        .expect("write stale live config");
+
+        let mut aggregate = Provider::with_id(
+            "agg-1".to_string(),
+            "My Aggregate".to_string(),
+            json!({
+                "auth": {},
+                "defaultModel": "deepseek-v4-flash",
+                "defaultReasoningEffort": "low",
+                "memberProviderIds": ["member-1"],
+                "aggregateModels": [
+                    { "model": "gpt-5.6-sol", "providerId": "member-1", "upstreamModel": "gpt-5.6-sol" },
+                    { "model": "deepseek-v4-flash", "providerId": "member-1", "upstreamModel": "deepseek-v4-flash" }
+                ],
+                "config": "model_provider = \"custom\"\nmodel = \"deepseek-v4-flash\"\nmodel_reasoning_effort = \"low\"\n"
+            }),
+            None,
+        );
+        aggregate.meta = Some(ProviderMeta {
+            provider_type: Some("aggregate".to_string()),
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &aggregate)
+            .expect("save aggregate");
+
+        service
+            .sync_codex_live_from_provider_while_proxy_active(&aggregate)
+            .await
+            .expect("project saved aggregate defaults to live");
+
+        let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read live config");
+        let parsed: toml::Value = toml::from_str(&live).expect("valid TOML");
+        assert_eq!(parsed["model"].as_str(), Some("deepseek-v4-flash"));
+        assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("low"));
+
+        let stored = db
+            .get_provider_by_id("agg-1", "codex")
+            .expect("load stored aggregate")
+            .expect("aggregate exists");
+        assert_eq!(
+            stored
+                .settings_config
+                .get("defaultModel")
+                .and_then(Value::as_str),
+            Some("deepseek-v4-flash"),
+            "saved default model must not be overwritten by stale live config"
+        );
+        assert_eq!(
+            stored
+                .settings_config
+                .get("defaultReasoningEffort")
+                .and_then(Value::as_str),
+            Some("low"),
+            "saved default reasoning effort must not be overwritten by stale live config"
+        );
+
+        persist_aggregate_user_settings_from_live(
+            db.as_ref(),
+            "agg-1",
+            &crate::codex_config::read_codex_live_settings().expect("read live settings"),
+        )
+        .expect("list() persist after projecting saved defaults");
+        let stored_after_list = db
+            .get_provider_by_id("agg-1", "codex")
+            .expect("reload stored aggregate")
+            .expect("aggregate exists");
+        assert_eq!(
+            stored_after_list
+                .settings_config
+                .get("defaultModel")
+                .and_then(Value::as_str),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            stored_after_list
+                .settings_config
+                .get("defaultReasoningEffort")
+                .and_then(Value::as_str),
+            Some("low")
+        );
     }
 }

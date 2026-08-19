@@ -302,6 +302,57 @@ pub fn validate_config_toml(text: &str) -> Result<(), AppError> {
         .map_err(|e| AppError::toml(Path::new("config.toml"), e))
 }
 
+/// 顶层重复键（常见于聚合编辑页多次写入 `model_reasoning_effort`）会让
+/// toml_edit 直接解析失败。先折叠再解析，避免接管/回填整段失败。
+fn parse_codex_toml_document(text: &str) -> Result<DocumentMut, AppError> {
+    match text.parse::<DocumentMut>() {
+        Ok(doc) => Ok(doc),
+        Err(original) => collapse_duplicate_top_level_toml_key(text, "model_reasoning_effort")
+            .parse::<DocumentMut>()
+            .map_err(|_| {
+                AppError::Message(format!("Invalid Codex config.toml: {original}"))
+            }),
+    }
+}
+
+fn is_top_level_toml_key_assignment(line: &str, key: &str) -> bool {
+    let trimmed = line.trim_start().trim_end_matches('\r');
+    if trimmed.starts_with('#') {
+        return false;
+    }
+    let Some(rest) = trimmed.strip_prefix(key) else {
+        return false;
+    };
+    rest.trim_start().starts_with('=')
+}
+
+fn collapse_duplicate_top_level_toml_key(text: &str, key: &str) -> String {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    let top_end = lines
+        .iter()
+        .position(|line| {
+            let trimmed = line.trim_start().trim_end_matches('\r');
+            trimmed.starts_with('[') && trimmed.trim_end().ends_with(']')
+        })
+        .unwrap_or(lines.len());
+
+    let mut keep: Option<usize> = None;
+    let mut remove = Vec::new();
+    for index in 0..top_end {
+        if !is_top_level_toml_key_assignment(lines[index], key) {
+            continue;
+        }
+        if let Some(previous) = keep {
+            remove.push(previous);
+        }
+        keep = Some(index);
+    }
+    for index in remove.into_iter().rev() {
+        lines.remove(index);
+    }
+    lines.join("\n")
+}
+
 /// 读取并校验 `~/.codex/config.toml`，返回文本（可能为空）
 pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     let s = read_codex_config_text()?;
@@ -2678,9 +2729,7 @@ pub fn build_aggregate_takeover_toml(
     let mut doc = if existing_config.trim().is_empty() {
         DocumentMut::new()
     } else {
-        existing_config
-            .parse::<DocumentMut>()
-            .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?
+        parse_codex_toml_document(existing_config)?
     };
 
     doc["model_provider"] = toml_edit::value("custom");
@@ -2763,6 +2812,21 @@ const CODEX_TAKEOVER_PROJECTED_KEYS: &[&str] = &[
     "experimental_bearer_token",
     "model_catalog_json",
     "model_providers",
+];
+
+/// 聚合供应商存储配置不应收下的 Live 投影字段。
+/// `model` / `model_reasoning_effort` 由专用逻辑回写，避免把代理 URL、MCP、
+/// catalog 路径写进虚拟供应商。
+const CODEX_AGGREGATE_STORED_SKIP_KEYS: &[&str] = &[
+    "model",
+    "model_provider",
+    "base_url",
+    "wire_api",
+    "experimental_bearer_token",
+    "model_catalog_json",
+    "model_providers",
+    "mcp_servers",
+    "mcp",
 ];
 
 /// Codex permission settings are application/user state, not provider routing
@@ -2865,6 +2929,110 @@ pub fn merge_codex_live_user_settings_into_backup(backup: &Value, live: &Value) 
     if let Some(obj) = result.as_object_mut() {
         obj.insert("config".to_string(), Value::String(merged.to_string()));
     }
+    result
+}
+
+/// 把 Live 里的用户设置写回聚合供应商，但不覆盖成员/模型映射，也不收下 auth。
+///
+/// 聚合供应商跳过了普通的 live 整包回填，否则 `aggregateModels` 会丢。结果是
+/// Codex Desktop 里改过的 `model_reasoning_effort`、personality、`[desktop]`
+/// 等从未进入供应商自己的 `config.toml`，编辑页看起来像「默认推理强度不在
+/// provider 里」。这里按字段合并：路由投影仍由接管生成，用户偏好落进存储。
+pub fn merge_codex_live_user_settings_into_aggregate(
+    provider_settings: &Value,
+    live: &Value,
+) -> Value {
+    let mut result = provider_settings.clone();
+    let Some(result_obj) = result.as_object_mut() else {
+        return provider_settings.clone();
+    };
+
+    let stored_cfg = result_obj
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut merged = if stored_cfg.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        match parse_codex_toml_document(&stored_cfg) {
+            Ok(doc) => doc,
+            Err(_) => return provider_settings.clone(),
+        }
+    };
+
+    let live_doc = live
+        .get("config")
+        .and_then(Value::as_str)
+        .and_then(|text| parse_codex_toml_document(text).ok());
+    if let Some(live_doc) = live_doc.as_ref() {
+        let usable = codex_config_text_has_proxy_projection(live_doc)
+            || live_doc
+                .get("model_provider")
+                .and_then(toml_edit::Item::as_str)
+                == Some("custom");
+        if usable {
+            for (key, value) in live_doc.iter() {
+                if CODEX_AGGREGATE_STORED_SKIP_KEYS.contains(&key) {
+                    continue;
+                }
+                merged.insert(key, value.clone());
+            }
+        }
+    }
+
+    merged.as_table_mut().remove("mcp_servers");
+    merged.as_table_mut().remove("mcp");
+    merged["model_provider"] = toml_edit::value("custom");
+
+    let catalog_models: Vec<String> = result_obj
+        .get("aggregateModels")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("model").and_then(Value::as_str))
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let live_model = live_doc
+        .as_ref()
+        .and_then(|doc| doc.get("model").and_then(toml_edit::Item::as_str))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
+    let stored_default = result_obj
+        .get("defaultModel")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
+    let model = live_model
+        .filter(|model| catalog_models.iter().any(|item| item == model))
+        .or(stored_default)
+        .or_else(|| catalog_models.first().cloned());
+    if let Some(model) = model {
+        merged["model"] = toml_edit::value(model.as_str());
+        result_obj.insert("defaultModel".to_string(), json!(model));
+    }
+
+    let effort = live_doc
+        .as_ref()
+        .and_then(|doc| {
+            doc.get("model_reasoning_effort")
+                .and_then(toml_edit::Item::as_str)
+        })
+        .and_then(normalize_codex_reasoning_effort)
+        .or_else(|| settings_default_reasoning_effort(provider_settings))
+        .unwrap_or("high");
+    merged["model_reasoning_effort"] = toml_edit::value(effort);
+    result_obj.insert(
+        "defaultReasoningEffort".to_string(),
+        json!(effort),
+    );
+
+    result_obj.insert("config".to_string(), json!(merged.to_string()));
     result
 }
 
@@ -6355,6 +6523,32 @@ base_url = "http://127.0.0.1:9999/v1"
     }
 
     #[test]
+    fn aggregate_build_takeover_toml_repairs_duplicate_reasoning_effort() {
+        let provider = crate::provider::Provider::with_id(
+            "agg-1".to_string(),
+            "My Aggregate".to_string(),
+            json!({
+                "defaultReasoningEffort": "max",
+                "aggregateModels": [
+                    { "model": "gpt-5.5@neko", "providerId": "neko", "upstreamModel": "gpt-5.5" }
+                ]
+            }),
+            None,
+        );
+        let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.5@neko\"\nmodel_reasoning_effort = \"high\"\nmodel_reasoning_effort = \"low\"\n";
+        let toml_text =
+            build_aggregate_takeover_toml(&provider, "http://127.0.0.1:15721/v1", existing)
+                .expect("build aggregate takeover toml");
+        let parsed: toml::Value = toml::from_str(&toml_text).expect("valid TOML");
+        assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("max"));
+        assert_eq!(
+            toml_text.matches("model_reasoning_effort =").count(),
+            1,
+            "takeover toml must not keep duplicate reasoning effort keys"
+        );
+    }
+
+    #[test]
     fn aggregate_build_takeover_toml_prefers_explicit_default_reasoning_effort() {
         let provider = crate::provider::Provider::with_id(
             "agg-1".to_string(),
@@ -6429,6 +6623,96 @@ base_url = "http://127.0.0.1:9999/v1"
             Some("ultra"),
             "stored aggregate config.toml must supply the default when the dedicated key is absent"
         );
+    }
+
+    #[test]
+    fn merge_live_user_settings_into_aggregate_keeps_mappings_and_reasoning() {
+        let stored = json!({
+            "auth": {},
+            "defaultModel": "gpt-5.6-sol",
+            "memberProviderIds": ["opencode"],
+            "aggregateModels": [
+                { "model": "gpt-5.6-sol", "providerId": "opencode", "upstreamModel": "gpt-5.6-sol" }
+            ],
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+        });
+        let live = json!({
+            "auth": { "OPENAI_API_KEY": "PROXY_MANAGED" },
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"low\"\npersonality = \"pragmatic\"\ndisable_response_storage = true\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n\n[desktop]\nlocaleOverride = \"en-US\"\n\n[mcp_servers.node_repl]\ncommand = \"/bin/true\"\n"
+        });
+
+        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
+        let cfg = merged.get("config").and_then(Value::as_str).expect("config");
+        assert_eq!(
+            merged.get("defaultReasoningEffort").and_then(Value::as_str),
+            Some("low")
+        );
+        assert_eq!(
+            merged.get("defaultModel").and_then(Value::as_str),
+            Some("gpt-5.6-sol")
+        );
+        assert!(
+            cfg.contains("model_reasoning_effort = \"low\""),
+            "reasoning effort must be stored on the aggregate provider, got: {cfg}"
+        );
+        assert!(
+            cfg.contains("personality = \"pragmatic\""),
+            "personality must be stored on the aggregate provider"
+        );
+        assert!(
+            cfg.contains("localeOverride = \"en-US\""),
+            "desktop settings must be stored on the aggregate provider"
+        );
+        assert!(
+            !cfg.contains("mcp_servers"),
+            "MCP belongs to live config.toml, not the aggregate provider"
+        );
+        assert!(
+            !cfg.contains("127.0.0.1:15721"),
+            "proxy base_url must not be stored on the aggregate provider"
+        );
+        assert!(
+            merged.get("auth").and_then(Value::as_object).is_some_and(|auth| auth.is_empty()),
+            "aggregate auth must stay empty"
+        );
+        assert_eq!(
+            merged
+                .get("aggregateModels")
+                .and_then(Value::as_array)
+                .map(|rows| rows.len()),
+            Some(1),
+            "member model mappings must not be replaced"
+        );
+    }
+
+    #[test]
+    fn merge_live_user_settings_into_aggregate_repairs_duplicate_reasoning_effort() {
+        let stored = json!({
+            "auth": {},
+            "defaultModel": "gpt-5.6-sol",
+            "memberProviderIds": ["opencode"],
+            "aggregateModels": [
+                { "model": "gpt-5.6-sol", "providerId": "opencode", "upstreamModel": "gpt-5.6-sol" }
+            ],
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"high\"\nmodel_reasoning_effort = \"low\"\nmodel_reasoning_effort = \"low\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\n"
+        });
+        let live = json!({
+            "auth": {},
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"max\"\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n"
+        });
+
+        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
+        let cfg = merged.get("config").and_then(Value::as_str).expect("config");
+        assert_eq!(
+            cfg.matches("model_reasoning_effort =").count(),
+            1,
+            "duplicate reasoning effort keys must be collapsed, got: {cfg}"
+        );
+        assert_eq!(
+            merged.get("defaultReasoningEffort").and_then(Value::as_str),
+            Some("max")
+        );
+        toml::from_str::<toml::Table>(cfg).expect("merged config must be valid TOML");
     }
 
     #[test]

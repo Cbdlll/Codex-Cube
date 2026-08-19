@@ -274,6 +274,22 @@ name = "Example"
     expect(extractCodexModelName(result)).toBe("gpt-5.6");
   });
 
+  it("collapses duplicate top-level model lines instead of inserting another", () => {
+    const duplicated = `model_provider = "custom"
+model = "gpt-5.6-sol"
+model = "old-model"
+
+[model_providers.custom]
+name = "Example"
+`;
+    const result = setCodexModelName(duplicated, "kimi-k3");
+    expect(
+      result.split("\n").filter((line) => /^\s*model\s*=/.test(line)),
+    ).toHaveLength(1);
+    expect(extractCodexModelName(result)).toBe("kimi-k3");
+    expect(result).toContain('model_provider = "custom"');
+  });
+
   it("replaces empty-string and single-quoted model lines", () => {
     const emptyModel = `model_provider = "custom"\nmodel = ""\n`;
     expect(extractCodexModelName(emptyModel)).toBe("");

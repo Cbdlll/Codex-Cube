@@ -7,7 +7,9 @@ import type {
 import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
+  extractCodexModelName,
   resolveCodexWireApi,
+  setCodexModelName,
 } from "@/utils/providerConfigUtils";
 
 /** 聚合 Provider 在 `meta.providerType` 中的标识（与后端一致）。 */
@@ -48,9 +50,64 @@ export function normalizeCodexReasoningEffort(
 }
 
 function reasoningEffortFromConfigToml(configText: string): string | undefined {
-  const match = configText.match(/^\s*model_reasoning_effort\s*=\s*"([^"]+)"/m);
-  const effort = match?.[1]?.trim();
+  const match = configText.match(
+    /^\s*model_reasoning_effort\s*=\s*(?:"([^"]+)"|'([^']+)')/m,
+  );
+  const effort = match?.[1]?.trim() || match?.[2]?.trim();
   return effort || undefined;
+}
+
+const TOML_SECTION_HEADER = /^\s*\[[^\]\r\n]+\]\s*$/;
+const TOML_REASONING_EFFORT_ASSIGNMENT = /^\s*model_reasoning_effort\s*=/;
+const TOML_MODEL_ASSIGNMENT = /^\s*model\s*=/;
+const TOML_MODEL_PROVIDER_ASSIGNMENT = /^\s*model_provider\s*=/;
+
+function topLevelTomlEndIndex(lines: string[]): number {
+  const index = lines.findIndex((line) => TOML_SECTION_HEADER.test(line));
+  return index === -1 ? lines.length : index;
+}
+
+/** 从 config.toml 读取顶层 model_reasoning_effort。 */
+export function extractCodexReasoningEffortFromConfig(
+  configText: string,
+): string | undefined {
+  return reasoningEffortFromConfigToml(configText);
+}
+
+/** 写入或更新 config.toml 顶层 model_reasoning_effort（只保留一行）。 */
+export function setCodexReasoningEffortInConfig(
+  configText: string,
+  effort: string,
+): string {
+  const resolved = normalizeCodexReasoningEffort(effort);
+  const line = `model_reasoning_effort = ${JSON.stringify(resolved)}`;
+  const normalized = String(configText ?? "").replace(/\r\n/g, "\n");
+  const lines = normalized ? normalized.split("\n") : [];
+  const topLevelEnd = topLevelTomlEndIndex(lines);
+
+  for (let index = topLevelEnd - 1; index >= 0; index -= 1) {
+    if (TOML_REASONING_EFFORT_ASSIGNMENT.test(lines[index])) {
+      lines.splice(index, 1);
+    }
+  }
+
+  const insertBound = topLevelTomlEndIndex(lines);
+  const modelIndex = lines.findIndex(
+    (item, index) => index < insertBound && TOML_MODEL_ASSIGNMENT.test(item),
+  );
+  const providerIndex = lines.findIndex(
+    (item, index) =>
+      index < insertBound && TOML_MODEL_PROVIDER_ASSIGNMENT.test(item),
+  );
+  const insertAt =
+    modelIndex !== -1
+      ? modelIndex + 1
+      : providerIndex !== -1
+        ? providerIndex + 1
+        : insertBound;
+
+  lines.splice(insertAt, 0, line);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
 }
 
 export type CodexMemberWireApi = "responses" | "chat" | "anthropic";
@@ -370,11 +427,12 @@ export function buildAggregateSettingsConfig(
   memberProviderIds: string[],
   defaultModel = "",
   defaultReasoningEffort = "",
+  extras?: { config?: string; auth?: unknown },
 ): Record<string, unknown> {
   const resolvedDefault =
     defaultModel.trim() || models[0]?.model.trim() || "gpt-5.6-sol";
   const resolvedEffort = normalizeCodexReasoningEffort(defaultReasoningEffort);
-  const config = `model_provider = "custom"
+  const generated = `model_provider = "custom"
 model = ${JSON.stringify(resolvedDefault)}
 model_reasoning_effort = ${JSON.stringify(resolvedEffort)}
 
@@ -382,8 +440,16 @@ model_reasoning_effort = ${JSON.stringify(resolvedEffort)}
 name = "custom"
 wire_api = "responses"
 requires_openai_auth = true`;
+  const existingConfig =
+    typeof extras?.config === "string" && extras.config.trim()
+      ? extras.config
+      : generated;
+  const config = setCodexReasoningEffortInConfig(
+    setCodexModelName(existingConfig, resolvedDefault),
+    resolvedEffort,
+  );
   return {
-    auth: {},
+    auth: extras?.auth !== undefined ? extras.auth : {},
     config,
     [AGGREGATE_MEMBERS_KEY]: memberProviderIds,
     [AGGREGATE_MODELS_KEY]: models,
@@ -391,6 +457,18 @@ requires_openai_auth = true`;
     [AGGREGATE_DEFAULT_REASONING_EFFORT_KEY]: resolvedEffort,
     modelCatalog: buildAggregateModelCatalog(models),
   };
+}
+
+/** 把默认模型和推理强度写进聚合供应商自己的 config.toml，与普通供应商一致。 */
+export function hydrateAggregateConfigToml(
+  configText: string,
+  defaultModel: string,
+  defaultReasoningEffort: string,
+): string {
+  const withModel = defaultModel.trim()
+    ? setCodexModelName(configText, defaultModel.trim())
+    : configText;
+  return setCodexReasoningEffortInConfig(withModel, defaultReasoningEffort);
 }
 
 /** 聚合 Provider 投影到 Codex 的 config.toml 预览（与后端接管投影一致）。 */
@@ -490,10 +568,16 @@ export function parseAggregateSettings(settingsConfig: Record<string, any>): {
       (item: AggregateProviderModel) =>
         item.model.trim() && item.providerId.trim(),
     );
-  const defaultModel =
+  const storedDefaultModel =
     typeof settingsConfig[AGGREGATE_DEFAULT_MODEL_KEY] === "string"
       ? settingsConfig[AGGREGATE_DEFAULT_MODEL_KEY].trim()
-      : models[0]?.model.trim() ?? "";
+      : "";
+  const tomlModel =
+    typeof settingsConfig.config === "string"
+      ? extractCodexModelName(settingsConfig.config)?.trim() ?? ""
+      : "";
+  const defaultModel =
+    storedDefaultModel || tomlModel || models[0]?.model.trim() || "";
   const storedEffort =
     settingsConfig[AGGREGATE_DEFAULT_REASONING_EFFORT_KEY] ??
     settingsConfig.default_reasoning_effort ??

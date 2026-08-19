@@ -653,6 +653,42 @@ pub(crate) fn should_backfill_provider_from_live(provider: &Provider) -> bool {
     !provider.is_aggregate()
 }
 
+/// 把当前 Live 里的用户偏好写回指定聚合供应商（不碰 auth / 成员映射）。
+pub(crate) fn persist_aggregate_user_settings_from_live(
+    db: &Database,
+    provider_id: &str,
+    live: &Value,
+) -> Result<(), AppError> {
+    let Some(provider) = db.get_provider_by_id(provider_id, AppType::Codex.as_str())? else {
+        return Ok(());
+    };
+    if !provider.is_aggregate() {
+        return Ok(());
+    }
+    let merged =
+        crate::codex_config::merge_codex_live_user_settings_into_aggregate(
+            &provider.settings_config,
+            live,
+        );
+    if merged == provider.settings_config {
+        return Ok(());
+    }
+    db.update_provider_settings_config(AppType::Codex.as_str(), provider_id, &merged)
+}
+
+/// 若当前供应商是聚合，把 Live 用户设置写回它的存储配置。
+pub(crate) fn persist_current_aggregate_user_settings_from_live(
+    db: &Database,
+) -> Result<(), AppError> {
+    let Some(current_id) =
+        crate::settings::get_effective_current_provider(db, &AppType::Codex)?
+    else {
+        return Ok(());
+    };
+    let live = crate::codex_config::read_codex_live_settings()?;
+    persist_aggregate_user_settings_from_live(db, &current_id, &live)
+}
+
 pub(crate) fn normalize_provider_common_config_for_storage(
     db: &Database,
     app_type: &AppType,

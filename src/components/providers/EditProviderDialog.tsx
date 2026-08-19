@@ -128,8 +128,9 @@ export function EditProviderDialog({
       }
 
       // 代理接管模式：Live 配置已被代理改写，读取 live 会导致编辑界面展示代理地址/占位符等内容
-      // 因此直接回退到 SSOT（数据库）配置，避免用户困惑与误保存
-      if (isProxyTakeover) {
+      // 因此直接回退到 SSOT（数据库）配置，避免用户困惑与误保存。
+      // 聚合供应商的成员/模型映射/默认模型也只存在数据库，不能用 Live 覆盖。
+      if (isProxyTakeover || isAggregateProvider(provider)) {
         if (!cancelled) {
           setLiveSettings(null);
           setHasLoadedLive(true);
@@ -279,23 +280,26 @@ export function EditProviderDialog({
         onClose={handleCancel}
         footer={
           <Button
-            variant="outline"
-            onClick={handleCancel}
-            className="border-border/20 hover:bg-accent hover:text-accent-foreground"
+            type="submit"
+            form="aggregate-provider-form"
+            disabled={isFormSubmitting}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
           >
-            {t("common.cancel")}
+            <Save className="h-4 w-4 mr-2" />
+            {t("common.save")}
           </Button>
         }
       >
-        <div className="h-[calc(100dvh-210px)]">
-          <AggregateProviderWizard
-            appId="codex"
-            initialProvider={provider}
-            onAdd={async () => {}}
-            onEdit={handleAggregateSubmit}
-            onCancel={() => onOpenChange(false)}
-          />
-        </div>
+        <AggregateProviderWizard
+          appId="codex"
+          initialProvider={provider}
+          onAdd={async () => {}}
+          onEdit={handleAggregateSubmit}
+          onCancel={handleCancel}
+          showButtons={false}
+          isProxyTakeover={isProxyTakeover}
+          onSubmittingChange={setIsFormSubmitting}
+        />
       </FullScreenPanel>
     );
   }

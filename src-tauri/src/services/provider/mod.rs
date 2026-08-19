@@ -27,6 +27,7 @@ pub use live::{
 // Internal re-exports (pub(crate))
 pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
+    persist_aggregate_user_settings_from_live, persist_current_aggregate_user_settings_from_live,
     provider_exists_in_live_config, should_backfill_provider_from_live,
     strip_common_config_from_live_settings, sync_current_provider_for_app_to_live,
     write_live_with_common_config,
@@ -1378,6 +1379,12 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<IndexMap<String, Provider>, AppError> {
+        if matches!(app_type, AppType::Codex) {
+            if let Err(error) = persist_current_aggregate_user_settings_from_live(state.db.as_ref())
+            {
+                log::warn!("同步聚合供应商用户设置失败（不影响列表）: {error}");
+            }
+        }
         state.db.get_all_providers(app_type.as_str())
     }
 
@@ -1529,14 +1536,10 @@ impl ProviderService {
                 )
                 .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
 
-                if futures::executor::block_on(state.proxy_service.is_running())
-                    && matches!(app_type, AppType::Codex)
-                {
-                    // A Live backup is also an ownership signal. Aggregate takeover may
-                    // have no auth.json placeholder, so live_taken_over alone can be false
-                    // even while config.toml still points at the running local proxy.
-                    // Re-project the current provider immediately so defaultModel and
-                    // model-catalog edits cannot leave stale takeover-owned Live fields.
+                if matches!(app_type, AppType::Codex) {
+                    // 当前供应商保存后必须立刻投影到 Live。代理是否正在运行不影响
+                    // ~/.codex/config.toml 是否该更新；否则默认模型/推理强度会只写库、
+                    // 随后 list() 再用旧 Live 盖回去。
                     futures::executor::block_on(
                         state
                             .proxy_service
@@ -1993,9 +1996,13 @@ impl ProviderService {
                                 } else {
                                     backfill_completed = true;
                                 }
-                            } else {
-                                log::info!(
-                                    "跳过聚合 Provider '{}' 的 live 回填（虚拟供应商）",
+                            } else if let Err(error) = persist_aggregate_user_settings_from_live(
+                                state.db.as_ref(),
+                                &current_id,
+                                &live_config,
+                            ) {
+                                log::warn!(
+                                    "同步聚合 Provider '{}' 的用户设置失败: {error}",
                                     current_provider.id
                                 );
                             }

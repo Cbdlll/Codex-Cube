@@ -9,24 +9,23 @@ import {
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
-  AlertTriangle,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Layers,
   Loader2,
   Plus,
   RefreshCw,
   Save,
-  Search,
   X,
 } from "lucide-react";
+import { useForm } from "react-hook-form";
+import { Form, FormLabel } from "@/components/ui/form";
+import { BasicFormFields } from "@/components/providers/forms/BasicFormFields";
+import { type ProviderFormData } from "@/lib/schemas/provider";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -34,29 +33,61 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { IconPicker } from "@/components/IconPicker";
 import { cn } from "@/lib/utils";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { providersApi, type AppId } from "@/lib/api";
 import { fetchModelsForConfig } from "@/lib/api/model-fetch";
 import type { AggregateProviderModel, CodexApiFormat, Provider } from "@/types";
+import CodexConfigEditor from "@/components/providers/forms/CodexConfigEditor";
+import {
+  ProviderAdvancedConfig,
+  type PricingModelSourceOption,
+} from "@/components/providers/forms/ProviderAdvancedConfig";
+import { useCodexCommonConfig } from "@/components/providers/forms/hooks/useCodexCommonConfig";
+import { useCodexTomlValidation } from "@/components/providers/forms/hooks/useCodexTomlValidation";
+import {
+  extractCodexModelName,
+  setCodexModelName,
+} from "@/utils/providerConfigUtils";
 import {
   type AggregateModelMeta,
   aggregateMetaFromCatalogEntry,
   applyAggregateModelMeta,
-  buildAggregateConfigTomlPreview,
   buildAggregateModels,
   buildAggregateSettingsConfig,
   CODEX_REASONING_EFFORTS,
+  extractCodexReasoningEffortFromConfig,
   generateAggregateProviderId,
   getAggregateModelApiFormat,
   getCodexMemberCredentials,
   getCodexMemberWireApi,
+  hydrateAggregateConfigToml,
   knownCodexContextWindow,
   normalizeAggregateModelsForSave,
   normalizeCodexReasoningEffort,
   parseAggregateSettings,
+  setCodexReasoningEffortInConfig,
   type CodexReasoningEffort,
 } from "@/utils/aggregateProvider";
+
+const AGGREGATE_FORM_ID = "aggregate-provider-form";
+
+const normalizePricingSource = (
+  value?: string,
+): PricingModelSourceOption =>
+  value === "request" || value === "response" ? value : "inherit";
+
+function stringifyAuth(auth: unknown): string {
+  try {
+    return JSON.stringify(auth ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
 
 const STEPS = [
   { id: 1, key: "basic", fallbackLabel: "基本信息" },
@@ -78,6 +109,9 @@ interface AggregateProviderWizardProps {
     originalId?: string;
   }) => Promise<void> | void;
   onCancel: () => void;
+  showButtons?: boolean;
+  isProxyTakeover?: boolean;
+  onSubmittingChange?: (isSubmitting: boolean) => void;
 }
 
 export function AggregateProviderWizard({
@@ -86,21 +120,43 @@ export function AggregateProviderWizard({
   onAdd,
   onEdit,
   onCancel,
+  showButtons = true,
+  isProxyTakeover = false,
+  onSubmittingChange,
 }: AggregateProviderWizardProps) {
   const { t } = useTranslation();
   const isEdit = Boolean(initialProvider);
-
-  // ---- 步骤 1：基本信息 ----
-  const [name, setName] = useState(initialProvider?.name ?? "");
-  const [icon, setIcon] = useState(initialProvider?.icon ?? "");
-  const [notes, setNotes] = useState(initialProvider?.notes ?? "");
-  const [websiteUrl, setWebsiteUrl] = useState(
-    initialProvider?.websiteUrl ?? "",
-  );
+  const form = useForm<ProviderFormData>({
+    defaultValues: {
+      name: initialProvider?.name ?? "",
+      notes: initialProvider?.notes ?? "",
+      websiteUrl: initialProvider?.websiteUrl ?? "",
+      icon: initialProvider?.icon ?? "",
+      iconColor: initialProvider?.iconColor ?? "",
+      settingsConfig: "{}",
+    },
+    mode: "onSubmit",
+  });
+  const name = form.watch("name") ?? "";
+  const notes = form.watch("notes") ?? "";
+  const websiteUrl = form.watch("websiteUrl") ?? "";
+  const icon = form.watch("icon") ?? "";
 
   // ---- 步骤 2：成员 ----
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [memberIds, setMemberIds] = useState<string[]>([]);
+  const [memberIds, setMemberIds] = useState<string[]>(() =>
+    initialProvider
+      ? parseAggregateSettings(
+          initialProvider.settingsConfig as Record<string, any>,
+        ).memberProviderIds
+      : [],
+  );
+  const [expandedMemberIds, setExpandedMemberIds] = useState<
+    Record<string, boolean>
+  >({});
+  const [expandedMappingIds, setExpandedMappingIds] = useState<
+    Record<string, boolean>
+  >({});
 
   // ---- 步骤 3：模型 ----
   const [fetchStates, setFetchStates] = useState<Record<string, FetchState>>(
@@ -128,16 +184,111 @@ export function AggregateProviderWizard({
   const [modelSearch, setModelSearch] = useState("");
   const [manualInputs, setManualInputs] = useState<Record<string, string>>({});
   /** 聚合 Provider 的默认模型：写入接管 config.toml 的 model，可在预览步骤选择。 */
-  const [defaultModel, setDefaultModel] = useState("");
-  /** 聚合 Provider 的默认推理强度：写入接管 config.toml 的 model_reasoning_effort。 */
+  const [defaultModel, setDefaultModel] = useState(() =>
+    initialProvider
+      ? parseAggregateSettings(
+          initialProvider.settingsConfig as Record<string, any>,
+        ).defaultModel
+      : "",
+  );
+  /** 聚合 Provider 的默认推理强度：与普通供应商一样写在 config.toml 的 model_reasoning_effort。 */
   const [defaultReasoningEffort, setDefaultReasoningEffort] =
-    useState<CodexReasoningEffort>("high");
+    useState<CodexReasoningEffort>(() =>
+      initialProvider
+        ? parseAggregateSettings(
+            initialProvider.settingsConfig as Record<string, any>,
+          ).defaultReasoningEffort
+        : "high",
+    );
 
   // 编辑模式直接落在「预览并保存」步骤：用户点编辑立刻看到已保存的成员/模型，
   // 而不是看起来像新建的初始化流程；通过「上一步 / 修改成员与模型」再调整。
   const [step, setStep] = useState(isEdit ? 4 : 1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const providersLoadedRef = useRef(false);
+  const configTouchedRef = useRef(
+    typeof (initialProvider?.settingsConfig as Record<string, unknown> | undefined)
+      ?.config === "string" &&
+      String(
+        (initialProvider?.settingsConfig as Record<string, unknown>).config,
+      ).trim().length > 0,
+  );
+  const [codexAuth, setCodexAuth] = useState(() =>
+    stringifyAuth(
+      (initialProvider?.settingsConfig as Record<string, unknown> | undefined)
+        ?.auth,
+    ),
+  );
+  const [codexConfig, setCodexConfig] = useState(() => {
+    const settings = (initialProvider?.settingsConfig ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const existing = typeof settings.config === "string" ? settings.config : "";
+    if (!initialProvider) return existing;
+    const parsed = parseAggregateSettings(settings as Record<string, any>);
+    return hydrateAggregateConfigToml(
+      existing,
+      parsed.defaultModel,
+      parsed.defaultReasoningEffort,
+    );
+  });
+  const [pricingConfig, setPricingConfig] = useState<{
+    enabled: boolean;
+    costMultiplier?: string;
+    pricingModelSource: PricingModelSourceOption;
+  }>(() => ({
+    enabled:
+      initialProvider?.meta?.costMultiplier !== undefined ||
+      initialProvider?.meta?.pricingModelSource !== undefined,
+    costMultiplier: initialProvider?.meta?.costMultiplier,
+    pricingModelSource: normalizePricingSource(
+      initialProvider?.meta?.pricingModelSource,
+    ),
+  }));
+
+  const { configError: codexConfigError, debouncedValidate, validateToml } =
+    useCodexTomlValidation();
+
+  const handleCodexConfigChange = useCallback(
+    (value: string) => {
+      configTouchedRef.current = true;
+      setCodexConfig(value);
+      debouncedValidate(value);
+      const model = extractCodexModelName(value)?.trim();
+      if (model) setDefaultModel(model);
+      const effort = extractCodexReasoningEffortFromConfig(value);
+      if (effort) setDefaultReasoningEffort(normalizeCodexReasoningEffort(effort));
+    },
+    [debouncedValidate],
+  );
+
+  const {
+    useCommonConfig: useCodexCommonConfigFlag,
+    commonConfigSnippet: codexCommonConfigSnippet,
+    commonConfigError: codexCommonConfigError,
+    handleCommonConfigToggle: handleCodexCommonConfigToggle,
+    handleCommonConfigSnippetChange: handleCodexCommonConfigSnippetChange,
+    isExtracting: isCodexExtracting,
+    handleExtract: handleCodexExtract,
+    clearCommonConfigError: clearCodexCommonConfigError,
+  } = useCodexCommonConfig({
+    codexConfig,
+    onConfigChange: handleCodexConfigChange,
+    initialData: initialProvider
+      ? {
+          settingsConfig: initialProvider.settingsConfig as Record<
+            string,
+            unknown
+          >,
+        }
+      : undefined,
+    initialEnabled: initialProvider?.meta?.commonConfigEnabled,
+  });
+
+  useEffect(() => {
+    onSubmittingChange?.(isSubmitting);
+  }, [isSubmitting, onSubmittingChange]);
 
   // 加载可用供应商（编辑/创建共用）
   useEffect(() => {
@@ -191,6 +342,9 @@ export function AggregateProviderWizard({
     setMemberIds(memberProviderIds);
     setDefaultModel(savedDefault);
     setDefaultReasoningEffort(savedEffort);
+    setCodexConfig((prev) =>
+      hydrateAggregateConfigToml(prev, savedDefault, savedEffort),
+    );
     const sel: Record<string, Set<string>> = {};
     const manual: Record<string, string[]> = {};
     const overrides: Record<string, string> = {};
@@ -355,12 +509,38 @@ export function AggregateProviderWizard({
     }
   }, [memberIds, fetchStates, handleFetchMemberModels, t]);
 
+  useEffect(() => {
+    if (!isEdit || memberIds.length === 0) return;
+    for (const providerId of memberIds) {
+      if (
+        fetchStates[providerId] === "idle" ||
+        fetchStates[providerId] === undefined
+      ) {
+        void handleFetchMemberModels(providerId);
+      }
+    }
+  }, [isEdit, memberIds, fetchStates, handleFetchMemberModels]);
+
   const toggleMember = useCallback((providerId: string, enabled: boolean) => {
     setMemberIds((current) =>
       enabled
         ? Array.from(new Set([...current, providerId]))
         : current.filter((id) => id !== providerId),
     );
+    if (!enabled) {
+      setExpandedMemberIds((current) => {
+        if (!(providerId in current)) return current;
+        const next = { ...current };
+        delete next[providerId];
+        return next;
+      });
+      setExpandedMappingIds((current) => {
+        if (!(providerId in current)) return current;
+        const next = { ...current };
+        delete next[providerId];
+        return next;
+      });
+    }
   }, []);
 
   const availableModelsFor = useCallback(
@@ -489,10 +669,31 @@ export function AggregateProviderWizard({
   useEffect(() => {
     const ids = builtModels.map((model) => model.model);
     if (ids.length === 0) return;
-    setDefaultModel((current) =>
-      current && ids.includes(current) ? current : (ids[0] ?? ""),
-    );
+    setDefaultModel((current) => {
+      const next = current && ids.includes(current) ? current : (ids[0] ?? "");
+      if (next && next !== current && configTouchedRef.current) {
+        setCodexConfig((prev) => setCodexModelName(prev, next));
+      }
+      return next;
+    });
   }, [builtModels]);
+
+  const generatedConfig = useMemo(() => {
+    return String(
+      buildAggregateSettingsConfig(
+        builtModels,
+        memberIds,
+        defaultModel,
+        defaultReasoningEffort,
+      ).config ?? "",
+    );
+  }, [builtModels, memberIds, defaultModel, defaultReasoningEffort]);
+
+  useEffect(() => {
+    if (configTouchedRef.current) return;
+    if (!generatedConfig.trim()) return;
+    setCodexConfig(generatedConfig);
+  }, [generatedConfig]);
 
   const selectedCount = useMemo(
     () =>
@@ -532,16 +733,45 @@ export function AggregateProviderWizard({
     }
     const normalized = normalizeAggregateModelsForSave(builtModels);
 
+    let auth: unknown = {};
+    try {
+      auth = JSON.parse(codexAuth);
+    } catch {
+      toast.error(
+        t("codexConfig.authJsonInvalid", {
+          defaultValue: "Auth JSON 格式无效",
+        }),
+      );
+      return;
+    }
+    if (codexConfigError || !validateToml(codexConfig)) {
+      toast.error(
+        t("codexConfig.configTomlInvalid", {
+          defaultValue: "config.toml 格式无效",
+        }),
+      );
+      return;
+    }
+
+    const resolvedEffort = normalizeCodexReasoningEffort(defaultReasoningEffort);
     const settingsConfig = buildAggregateSettingsConfig(
       normalized,
       memberIds,
       defaultModel,
-      defaultReasoningEffort,
+      resolvedEffort,
+      { config: codexConfig, auth },
     );
     const meta: Provider["meta"] = {
       ...(initialProvider?.meta ?? {}),
       providerType: "aggregate",
       apiFormat: "openai_responses",
+      commonConfigEnabled: useCodexCommonConfigFlag,
+      costMultiplier: pricingConfig.enabled
+        ? pricingConfig.costMultiplier
+        : undefined,
+      pricingModelSource: pricingConfig.enabled
+        ? pricingConfig.pricingModelSource
+        : undefined,
     };
     const base = {
       name: name.trim(),
@@ -584,6 +814,13 @@ export function AggregateProviderWizard({
     onAdd,
     onEdit,
     t,
+    providers,
+    codexAuth,
+    codexConfig,
+    codexConfigError,
+    validateToml,
+    useCodexCommonConfigFlag,
+    pricingConfig,
   ]);
 
   const selectedMemberProviders = useMemo(
@@ -593,6 +830,9 @@ export function AggregateProviderWizard({
         .filter(Boolean) as Provider[],
     [memberIds, providers],
   );
+
+  const isRecordExpanded = (map: Record<string, boolean>, id: string) =>
+    map[id] === true;
 
   const canGoNext =
     (step === 1 && name.trim().length > 0) ||
@@ -609,13 +849,641 @@ export function AggregateProviderWizard({
     [availableModelsFor, modelSearch],
   );
 
+  const handleDefaultModelChange = useCallback((value: string) => {
+    setDefaultModel(value);
+    configTouchedRef.current = true;
+    setCodexConfig((prev) => setCodexModelName(prev, value));
+  }, []);
+
+  const handleDefaultReasoningEffortChange = useCallback((value: string) => {
+    const effort = normalizeCodexReasoningEffort(value);
+    setDefaultReasoningEffort(effort);
+    configTouchedRef.current = true;
+    setCodexConfig((prev) => setCodexReasoningEffortInConfig(prev, effort));
+  }, []);
+
+  const defaultModelOptions = useMemo(() => {
+    const models = [...builtModels];
+    if (defaultModel && !models.some((model) => model.model === defaultModel)) {
+      models.unshift({
+        model: defaultModel,
+        providerId: "",
+      });
+    }
+    return models;
+  }, [builtModels, defaultModel]);
+
+  const configEditor = (
+    <CodexConfigEditor
+      authValue={codexAuth}
+      configValue={codexConfig}
+      providerName={name}
+      showRemoteCompaction
+      isProxyTakeover={isProxyTakeover}
+      onAuthChange={setCodexAuth}
+      onConfigChange={handleCodexConfigChange}
+      useCommonConfig={useCodexCommonConfigFlag}
+      onCommonConfigToggle={handleCodexCommonConfigToggle}
+      commonConfigSnippet={codexCommonConfigSnippet}
+      onCommonConfigSnippetChange={handleCodexCommonConfigSnippetChange}
+      onCommonConfigErrorClear={clearCodexCommonConfigError}
+      commonConfigError={codexCommonConfigError}
+      authError=""
+      configError={codexConfigError}
+      onExtract={handleCodexExtract}
+      isExtracting={isCodexExtracting}
+      showAuth={false}
+    />
+  );
+
+  const advancedConfig = (
+    <ProviderAdvancedConfig
+      pricingConfig={pricingConfig}
+      onPricingConfigChange={setPricingConfig}
+    />
+  );
+
+  const mappingGridClass =
+    "md:grid-cols-[minmax(0,1.2fr)_112px_minmax(0,1fr)_minmax(0,1fr)]";
+
+  const renderProviderMappingTable = (provider: Provider) => {
+    const groupModels = builtModels.filter(
+      (model) => model.providerId === provider.id,
+    );
+    if (groupModels.length === 0) return null;
+    return (
+      <div className="space-y-2">
+        <div
+          className={cn(
+            "hidden gap-2 px-1 text-xs font-medium text-muted-foreground md:grid",
+            mappingGridClass,
+          )}
+        >
+          <span>
+            {t("codexConfig.catalogColumnDisplay", {
+              defaultValue: "菜单显示名",
+            })}
+          </span>
+          <span>
+            {t("codexConfig.catalogColumnContext", {
+              defaultValue: "上下文窗口",
+            })}
+          </span>
+          <span>
+            {t("codexConfig.catalogColumnModel", {
+              defaultValue: "实际请求模型",
+            })}
+          </span>
+          <span>
+            {t("codexConfig.upstreamFormatLabel", {
+              defaultValue: "上游格式",
+            })}
+          </span>
+        </div>
+        {groupModels.map((model, index) => {
+          const key = `${model.providerId}::${model.upstreamModel}`;
+          const upstreamModel = model.upstreamModel ?? model.model;
+          const contextWindowValue =
+            model.contextWindow === undefined || model.contextWindow === ""
+              ? ""
+              : String(model.contextWindow);
+          return (
+            <div
+              key={`${key}-${index}`}
+              className={cn("grid grid-cols-1 gap-2", mappingGridClass)}
+            >
+              <Input
+                value={
+                  displayNameOverrides[key] ??
+                  model.displayName ??
+                  model.model
+                }
+                onChange={(e) =>
+                  setDisplayNameOverrides((s) => ({
+                    ...s,
+                    [key]: e.target.value,
+                  }))
+                }
+                placeholder={t("codexConfig.catalogDisplayNamePlaceholder", {
+                  defaultValue: "例如: DeepSeek V4 Flash",
+                })}
+                aria-label={t("codexConfig.catalogColumnDisplay", {
+                  defaultValue: "菜单显示名",
+                })}
+              />
+              <Input
+                type="text"
+                inputMode="numeric"
+                value={contextWindowValue}
+                onChange={(event) => {
+                  const next = event.target.value.replace(/[^\d]/g, "");
+                  setModelMeta((current) => {
+                    const existing =
+                      current[model.providerId]?.[upstreamModel] ?? {};
+                    const rest = { ...existing };
+                    delete rest.contextWindow;
+                    return {
+                      ...current,
+                      [model.providerId]: {
+                        ...(current[model.providerId] ?? {}),
+                        [upstreamModel]: next
+                          ? {
+                              ...existing,
+                              contextWindow: Number(next),
+                            }
+                          : rest,
+                      },
+                    };
+                  });
+                }}
+                placeholder={t("codexConfig.contextWindowPlaceholder", {
+                  defaultValue: "例如: 128000",
+                })}
+                aria-label={t("codexConfig.catalogColumnContext", {
+                  defaultValue: "上下文窗口",
+                })}
+              />
+              <Input
+                value={upstreamModel}
+                readOnly
+                className="min-w-0"
+                aria-label={t("codexConfig.catalogColumnModel", {
+                  defaultValue: "实际请求模型",
+                })}
+              />
+              <div className="min-w-0">
+                <Select
+                  value={
+                    apiFormatOverrides[key] ??
+                    getAggregateModelApiFormat(provider)
+                  }
+                  onValueChange={(value) => {
+                    setApiFormatOverrides((current) => {
+                      if (value === getAggregateModelApiFormat(provider)) {
+                        const next = { ...current };
+                        delete next[key];
+                        return next;
+                      }
+                      return {
+                        ...current,
+                        [key]: value as CodexApiFormat,
+                      };
+                    });
+                  }}
+                >
+                  <SelectTrigger
+                    aria-label={t("codexConfig.upstreamFormatLabel", {
+                      defaultValue: "上游格式",
+                    })}
+                    title={t("codexConfig.upstreamFormatHint", {
+                      defaultValue:
+                        "供应商原生为 Responses API 就选 Responses（直连，不转换格式）；使用 Chat Completions 协议就选 Chat；供应商只提供原生 Anthropic Messages 协议就选 Anthropic Messages。Chat 与 Anthropic Messages 均需开启路由接管才能转换为 Responses。",
+                    })}
+                    className="w-full min-w-0 overflow-hidden [&>span]:min-w-0 [&>span]:flex-1 [&>span]:truncate [&>svg]:shrink-0"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="openai_responses">
+                      {t("aggregate.upstreamFormatShortResponses", {
+                        defaultValue: "Responses",
+                      })}
+                    </SelectItem>
+                    <SelectItem value="openai_chat">
+                      {t("aggregate.upstreamFormatShortChat", {
+                        defaultValue: "Chat Completions",
+                      })}
+                    </SelectItem>
+                    <SelectItem value="anthropic">
+                      {t("aggregate.upstreamFormatShortAnthropic", {
+                        defaultValue: "Anthropic Messages",
+                      })}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const formClassName = "space-y-6 glass rounded-xl p-6 border border-white/10";
+
+  const sections = (
+        <div className="w-full space-y-6">
+          {(isEdit || step === 1) && <BasicFormFields form={form} />}
+
+          {/* 步骤 2：选择成员 */}
+          {(isEdit || step === 2) && (
+            <div className="space-y-1.5">
+              <FormLabel>
+                {t("aggregate.step.members", { defaultValue: "选择成员" })}
+              </FormLabel>
+              {memberCandidates.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("aggregate.noMembers", {
+                    defaultValue:
+                      "还没有可用的 Codex 供应商，请先添加普通供应商。",
+                  })}
+                </p>
+              ) : (
+                <div className="divide-y divide-border-default rounded-lg border border-border-default">
+                  {memberCandidates.map((provider) => {
+                    const wireApi = getCodexMemberWireApi(provider);
+                    const checked = memberIds.includes(provider.id);
+                    const { baseUrl } = getCodexMemberCredentials(provider);
+                    return (
+                      <label
+                        key={provider.id}
+                        htmlFor={`member-${provider.id}`}
+                        className="flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-muted/30"
+                      >
+                        <Checkbox
+                          id={`member-${provider.id}`}
+                          checked={checked}
+                          onCheckedChange={(v) =>
+                            toggleMember(provider.id, Boolean(v))
+                          }
+                        />
+                        <span className="min-w-0 flex-1 truncate text-sm">
+                          {provider.name}
+                        </span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {wireApi}
+                          {baseUrl ? ` · ${baseUrl}` : ""}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {(isEdit || step === 3) && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <FormLabel>
+                  {t("aggregate.step.models", { defaultValue: "选择模型" })}
+                </FormLabel>
+                <Input
+                  value={modelSearch}
+                  onChange={(e) => setModelSearch(e.target.value)}
+                  placeholder={t("aggregate.searchModels", {
+                    defaultValue: "搜索模型…",
+                  })}
+                  className="h-9 max-w-[220px]"
+                />
+              </div>
+
+              {selectedMemberProviders.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("aggregate.noSelectedMembers", {
+                    defaultValue: "请先选择成员供应商",
+                  })}
+                </p>
+              ) : (
+                selectedMemberProviders.map((provider) => {
+                  const state = fetchStates[provider.id] ?? "idle";
+                  const available = availableModelsFor(provider.id);
+                  const filtered = filteredModelsFor(provider.id);
+                  const selected =
+                    selectedModels[provider.id] ?? new Set<string>();
+                  const expanded = isRecordExpanded(
+                    expandedMemberIds,
+                    provider.id,
+                  );
+                  return (
+                    <Collapsible
+                      key={provider.id}
+                      open={expanded}
+                      onOpenChange={(open) =>
+                        setExpandedMemberIds((prev) => ({
+                          ...prev,
+                          [provider.id]: open,
+                        }))
+                      }
+                      className="space-y-3 rounded-lg border border-border-default p-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <CollapsibleTrigger asChild>
+                          <Button
+                            type="button"
+                            variant={null}
+                            size="sm"
+                            className="h-8 min-w-0 flex-1 justify-start gap-1.5 px-0 text-sm font-medium text-foreground hover:opacity-70"
+                          >
+                            {expanded ? (
+                              <ChevronDown className="h-4 w-4 shrink-0" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4 shrink-0" />
+                            )}
+                            <span className="min-w-0 truncate">
+                              {provider.name}
+                            </span>
+                            <span className="shrink-0 text-xs font-normal text-muted-foreground">
+                              {t("aggregate.selectedCount", {
+                                count: selected.size,
+                                defaultValue: "已选 {{count}} 个模型",
+                              })}
+                            </span>
+                          </Button>
+                        </CollapsibleTrigger>
+                        <div className="flex gap-1">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 gap-1"
+                            disabled={state === "loading"}
+                            onClick={() =>
+                              void handleFetchMemberModels(provider.id)
+                            }
+                          >
+                            {state === "loading" ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-3.5 w-3.5" />
+                            )}
+                            {t("providerForm.fetchModels")}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 gap-1"
+                            disabled={available.length === 0}
+                            onClick={() =>
+                              toggleAllForProvider(
+                                provider.id,
+                                selected.size !== available.length,
+                              )
+                            }
+                          >
+                            {selected.size === available.length &&
+                            available.length > 0
+                              ? t("aggregate.deselectAll", {
+                                  defaultValue: "取消全选",
+                                })
+                              : t("aggregate.selectAll", {
+                                  defaultValue: "全选",
+                                })}
+                          </Button>
+                        </div>
+                      </div>
+
+                      <CollapsibleContent className="space-y-3">
+                        {filtered.length === 0 ? (
+                          <p className="text-sm text-muted-foreground">
+                            {t("aggregate.noModelsForMember", {
+                              defaultValue:
+                                "没有可用模型，可手动添加模型 ID。",
+                            })}
+                          </p>
+                        ) : (
+                          <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+                            {filtered.map((model) => {
+                              const isManual = (
+                                manualModels[provider.id] ?? []
+                              ).includes(model);
+                              return (
+                                <label
+                                  key={model}
+                                  className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted/40"
+                                >
+                                  <Checkbox
+                                    checked={selected.has(model)}
+                                    onCheckedChange={(v) =>
+                                      toggleModel(
+                                        provider.id,
+                                        model,
+                                        Boolean(v),
+                                      )
+                                    }
+                                  />
+                                  <span className="min-w-0 flex-1 truncate">
+                                    {model}
+                                  </span>
+                                  {isManual && (
+                                    <button
+                                      type="button"
+                                      className="text-muted-foreground hover:text-destructive"
+                                      title={t("common.delete", {
+                                        defaultValue: "删除",
+                                      })}
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        removeManualModel(provider.id, model);
+                                      }}
+                                    >
+                                      <X className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        <div className="flex gap-1">
+                          <Input
+                            value={manualInputs[provider.id] ?? ""}
+                            onChange={(e) =>
+                              setManualInputs((s) => ({
+                                ...s,
+                                [provider.id]: e.target.value,
+                              }))
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                addManualModel(provider.id);
+                              }
+                            }}
+                            placeholder={t(
+                              "codexConfig.catalogModelPlaceholder",
+                              {
+                                defaultValue: "例如: deepseek-v4-flash",
+                              },
+                            )}
+                            className="flex-1"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-9 gap-1"
+                            onClick={() => addManualModel(provider.id)}
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            {t("codexConfig.addCatalogModel", {
+                              defaultValue: "添加模型",
+                            })}
+                          </Button>
+                        </div>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  );
+                })
+              )}
+            </div>
+          )}
+
+          {(isEdit || step === 4) && (
+            <div className="space-y-4">
+              {builtModels.length > 0 && (
+                <div className="space-y-3">
+                  <FormLabel>
+                    {t("aggregate.selectedModelsHeading", {
+                      defaultValue: "已选设置",
+                    })}
+                  </FormLabel>
+                  <div className="divide-y divide-border-default rounded-lg border border-border-default bg-muted/20">
+                    {selectedMemberProviders.map((provider) => {
+                      const groupModels = builtModels.filter(
+                        (model) => model.providerId === provider.id,
+                      );
+                      if (groupModels.length === 0) return null;
+                      const expanded = isRecordExpanded(
+                        expandedMappingIds,
+                        provider.id,
+                      );
+                      return (
+                        <Collapsible
+                          key={provider.id}
+                          open={expanded}
+                          onOpenChange={(open) =>
+                            setExpandedMappingIds((prev) => ({
+                              ...prev,
+                              [provider.id]: open,
+                            }))
+                          }
+                        >
+                          <CollapsibleTrigger asChild>
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-muted/40"
+                            >
+                              {expanded ? (
+                                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              ) : (
+                                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              )}
+                              <span className="min-w-0 flex-1 truncate font-medium">
+                                {provider.name}
+                              </span>
+                              <span className="shrink-0 text-xs text-muted-foreground">
+                                {t("aggregate.modelCount", {
+                                  count: groupModels.length,
+                                  defaultValue: "{{count}} 个模型",
+                                })}
+                              </span>
+                            </button>
+                          </CollapsibleTrigger>
+                          <CollapsibleContent className="px-3 pb-3">
+                            {renderProviderMappingTable(provider)}
+                          </CollapsibleContent>
+                        </Collapsible>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <FormLabel htmlFor="aggregate-default-model">
+                  {t("codexConfig.defaultModelLabel", {
+                    defaultValue: "默认模型",
+                  })}
+                </FormLabel>
+                <Select
+                  value={defaultModel}
+                  onValueChange={handleDefaultModelChange}
+                  disabled={builtModels.length === 0}
+                >
+                  <SelectTrigger id="aggregate-default-model" className="w-full">
+                    <SelectValue
+                      placeholder={t("codexConfig.defaultModelPlaceholder", {
+                        defaultValue: "例如: gpt-5.6",
+                      })}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {defaultModelOptions.map((model) => (
+                      <SelectItem key={model.model} value={model.model}>
+                        {model.displayName &&
+                        model.displayName !== model.model
+                          ? `${model.displayName} (${model.model})`
+                          : model.model}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <FormLabel htmlFor="aggregate-reasoning-effort">
+                  {t("aggregate.defaultReasoningEffort", {
+                    defaultValue: "默认推理强度",
+                  })}
+                </FormLabel>
+                <Select
+                  value={defaultReasoningEffort}
+                  onValueChange={handleDefaultReasoningEffortChange}
+                >
+                  <SelectTrigger
+                    id="aggregate-reasoning-effort"
+                    className="w-full"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CODEX_REASONING_EFFORTS.map((effort) => (
+                      <SelectItem key={effort} value={effort}>
+                        {effort}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              </div>
+
+              <div>
+                {configEditor}
+              </div>
+              {advancedConfig}
+            </div>
+          )}
+        </div>
+  );
+
+  if (isEdit) {
+    return (
+      <Form {...form}>
+        <form
+          id={AGGREGATE_FORM_ID}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleSave();
+          }}
+          className={formClassName}
+        >
+          {sections}
+        </form>
+      </Form>
+    );
+  }
+
   return (
+    <Form {...form}>
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {/* 步骤指示器：节点与标签垂直排列，连线独立于标签布局，避免重叠。 */}
       <div className="mb-6 mt-2 flex shrink-0 justify-center">
         <div
           data-testid="aggregate-wizard-stepper"
-          className="flex w-full max-w-3xl items-start justify-center"
+          className="flex w-full items-start justify-center"
         >
           {STEPS.map((s, index) => {
             const active = step === s.id;
@@ -662,708 +1530,52 @@ export function AggregateProviderWizard({
         </div>
       </div>
 
-      {isEdit && (
-        <div className="mb-4 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2.5 text-xs text-foreground">
-          <span className="font-medium">
-            {t("aggregate.editModeHint", {
-              name,
-              defaultValue:
-                "编辑模式：已载入「{{name}}」的成员与模型，可直接修改或保存。",
-            })}
-          </span>
-          <span className="ml-2 text-muted-foreground">
-            {t("aggregate.editModeHintSub", {
-              defaultValue:
-                "增减成员请进入「选择成员」，增减模型请进入「选择模型」。",
-            })}
-          </span>
+      <div className="min-h-0 flex-1 overflow-y-auto scroll-overlay">
+        {sections}
+      </div>
+
+      {showButtons && (
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border-default bg-background py-4">
+          <Button variant="outline" disabled={isSubmitting} onClick={onCancel}>
+            {t("common.cancel", { defaultValue: "取消" })}
+          </Button>
+          <div className="flex items-center gap-2">
+            {step > 1 && (
+              <Button
+                variant="ghost"
+                disabled={isSubmitting}
+                onClick={() => setStep((s) => s - 1)}
+              >
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                {t("aggregate.previous", { defaultValue: "上一步" })}
+              </Button>
+            )}
+            {step < 4 ? (
+              <Button
+                disabled={!canGoNext}
+                onClick={
+                  step === 2
+                    ? handleNextFromMembers
+                    : () => setStep((s) => s + 1)
+                }
+              >
+                {t("aggregate.next", { defaultValue: "下一步" })}
+                <ChevronRight className="ml-1 h-4 w-4" />
+              </Button>
+            ) : (
+              <Button disabled={isSubmitting} onClick={() => void handleSave()}>
+                {isSubmitting ? (
+                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="mr-1 h-4 w-4" />
+                )}
+                {t("common.add", { defaultValue: "添加" })}
+              </Button>
+            )}
+          </div>
         </div>
       )}
-
-      <ScrollArea className="min-h-0 flex-1 pr-3">
-        <div className="mx-auto w-full max-w-5xl">
-          {/* 步骤 1：基本信息 */}
-          {step === 1 && (
-            <div className="space-y-4">
-              <div className="rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
-                {t("aggregate.basicHint", {
-                  defaultValue:
-                    "聚合 Provider 会把多个第三方 Codex 供应商聚合成一个虚拟供应商；每个模型可独立选择上游 API 协议。",
-                })}
-              </div>
-              <div className="space-y-4 rounded-lg border border-border/60 bg-card p-4">
-                <div className="space-y-2">
-                  <Label htmlFor="aggregate-name">
-                    {t("aggregate.name", { defaultValue: "名称" })}
-                    <span className="text-destructive"> *</span>
-                  </Label>
-                  <Input
-                    id="aggregate-name"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder={t("aggregate.namePlaceholder", {
-                      defaultValue: "例如：我的多供应商聚合",
-                    })}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>{t("aggregate.icon", { defaultValue: "图标" })}</Label>
-                  <IconPicker value={icon} onValueChange={setIcon} />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="aggregate-notes">
-                    {t("aggregate.notes", { defaultValue: "备注" })}
-                  </Label>
-                  <Input
-                    id="aggregate-notes"
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    placeholder={t("aggregate.notesPlaceholder", {
-                      defaultValue: "可选，说明这个聚合的用途",
-                    })}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="aggregate-website-url">
-                    {t("provider.websiteUrl", { defaultValue: "官网地址" })}
-                  </Label>
-                  <Input
-                    id="aggregate-website-url"
-                    value={websiteUrl}
-                    onChange={(e) => setWebsiteUrl(e.target.value)}
-                    placeholder={t("providerForm.websiteUrlPlaceholder", {
-                      defaultValue: "可选，填写供应商官网地址",
-                    })}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* 步骤 2：选择成员 */}
-          {step === 2 && (
-            <div className="space-y-4">
-              <div className="rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
-                {t("aggregate.membersHint", {
-                  defaultValue:
-                    "选择要聚合的 Codex 供应商。成员可使用 Responses、Chat Completions 或 Anthropic Messages；具体协议可在预览页按模型调整。",
-                })}
-              </div>
-              {memberCandidates.length === 0 ? (
-                <div className="flex flex-col items-center gap-2 py-10 text-center">
-                  <Layers className="h-8 w-8 text-muted-foreground" />
-                  <p className="text-sm text-muted-foreground">
-                    {t("aggregate.noMembers", {
-                      defaultValue:
-                        "还没有可用的 Codex 供应商，请先添加普通供应商。",
-                    })}
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {memberCandidates.map((provider) => {
-                    const wireApi = getCodexMemberWireApi(provider);
-                    const checked = memberIds.includes(provider.id);
-                    const { baseUrl, apiKey } =
-                      getCodexMemberCredentials(provider);
-                    return (
-                      <div
-                        key={provider.id}
-                        className="flex items-start gap-3 rounded-lg border border-border/60 p-3 hover:bg-accent/40"
-                      >
-                        <Checkbox
-                          id={`member-${provider.id}`}
-                          checked={checked}
-                          onCheckedChange={(v) =>
-                            toggleMember(provider.id, Boolean(v))
-                          }
-                        />
-                        <div className="min-w-0 flex-1">
-                          <label
-                            htmlFor={`member-${provider.id}`}
-                            className="flex cursor-pointer items-center gap-2 text-sm font-medium"
-                          >
-                            {provider.name}
-                            <Badge variant="secondary">{wireApi}</Badge>
-                          </label>
-                          <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                            {[
-                              baseUrl ||
-                                t("aggregate.noBaseUrl", {
-                                  defaultValue: "无端点",
-                                }),
-                              apiKey
-                                ? t("aggregate.hasKey", {
-                                    defaultValue: "已配置 Key",
-                                  })
-                                : t("aggregate.noKey", {
-                                    defaultValue:
-                                      "缺少 Key（可能无法拉取模型）",
-                                  }),
-                            ].join(" · ")}
-                          </p>
-                        </div>
-                        <Badge
-                          variant={checked ? "default" : "outline"}
-                          className="shrink-0"
-                        >
-                          {checked
-                            ? t("aggregate.selected", {
-                                defaultValue: "已选择",
-                              })
-                            : t("aggregate.select", { defaultValue: "选择" })}
-                        </Badge>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 步骤 3：选择模型 */}
-          {step === 3 && (
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
-                <Search className="h-3.5 w-3.5 shrink-0" />
-                <Input
-                  value={modelSearch}
-                  onChange={(e) => setModelSearch(e.target.value)}
-                  placeholder={t("aggregate.searchModels", {
-                    defaultValue: "搜索模型…",
-                  })}
-                  className="h-7 w-48 bg-background text-xs"
-                />
-                <span className="ml-auto">
-                  {t("aggregate.selectedCount", {
-                    count: selectedCount,
-                    defaultValue: `已选 ${selectedCount} 个模型`,
-                  })}
-                </span>
-              </div>
-
-              {selectedMemberProviders.length === 0 ? (
-                <div className="py-8 text-center text-sm text-muted-foreground">
-                  {t("aggregate.noSelectedMembers", {
-                    defaultValue: "请先在上一步选择成员供应商",
-                  })}
-                </div>
-              ) : (
-                selectedMemberProviders.map((provider) => {
-                  const state = fetchStates[provider.id] ?? "idle";
-                  const available = availableModelsFor(provider.id);
-                  const filtered = filteredModelsFor(provider.id);
-                  const selected =
-                    selectedModels[provider.id] ?? new Set<string>();
-                  return (
-                    <div
-                      key={provider.id}
-                      className="rounded-lg border border-border/60"
-                    >
-                      <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
-                        <span className="text-sm font-medium">
-                          {provider.name}
-                        </span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2 text-xs"
-                          disabled={state === "loading"}
-                          onClick={() =>
-                            void handleFetchMemberModels(provider.id)
-                          }
-                        >
-                          <RefreshCw
-                            className={cn(
-                              "mr-1 h-3 w-3",
-                              state === "loading" && "animate-spin",
-                            )}
-                          />
-                          {t("aggregate.fetchModels", {
-                            defaultValue: "获取模型",
-                          })}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2 text-xs"
-                          disabled={available.length === 0}
-                          onClick={() =>
-                            toggleAllForProvider(
-                              provider.id,
-                              selected.size !== available.length,
-                            )
-                          }
-                        >
-                          {selected.size === available.length &&
-                          available.length > 0
-                            ? t("aggregate.deselectAll", {
-                                defaultValue: "取消全选",
-                              })
-                            : t("aggregate.selectAll", {
-                                defaultValue: "全选",
-                              })}
-                        </Button>
-                        {state === "error" && (
-                          <Badge variant="secondary" className="gap-1">
-                            <AlertTriangle className="h-3 w-3" />
-                            {t("aggregate.usingFallback", {
-                              defaultValue: "已用本地模型目录回退",
-                            })}
-                          </Badge>
-                        )}
-                      </div>
-
-                      {state === "loading" ? (
-                        <div className="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          {t("aggregate.fetching", {
-                            defaultValue: "正在获取模型…",
-                          })}
-                        </div>
-                      ) : filtered.length === 0 ? (
-                        <div className="px-3 py-4 text-xs text-muted-foreground">
-                          {t("aggregate.noModelsForMember", {
-                            defaultValue:
-                              "没有可用模型，可手动添加下方模型 ID。",
-                          })}
-                        </div>
-                      ) : (
-                        <div className="grid max-h-64 grid-cols-1 gap-1 overflow-y-auto p-2 sm:grid-cols-2">
-                          {filtered.map((model) => {
-                            const key = `${provider.id}::${model}`;
-                            const override = displayNameOverrides[key];
-                            const isManual = (
-                              manualModels[provider.id] ?? []
-                            ).includes(model);
-                            return (
-                              <label
-                                key={model}
-                                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent/40"
-                              >
-                                <Checkbox
-                                  checked={selected.has(model)}
-                                  onCheckedChange={(v) =>
-                                    toggleModel(provider.id, model, Boolean(v))
-                                  }
-                                />
-                                <span className="min-w-0 flex-1 truncate">
-                                  {model}
-                                </span>
-                                {isManual && (
-                                  <button
-                                    type="button"
-                                    className="text-muted-foreground hover:text-destructive"
-                                    title={t("common.remove", {
-                                      defaultValue: "删除",
-                                    })}
-                                    onClick={(e) => {
-                                      e.preventDefault();
-                                      removeManualModel(provider.id, model);
-                                    }}
-                                  >
-                                    <X className="h-3.5 w-3.5" />
-                                  </button>
-                                )}
-                                {override ? (
-                                  <span className="max-w-[40%] truncate text-xs text-muted-foreground">
-                                    → {override}
-                                  </span>
-                                ) : null}
-                              </label>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      <div className="flex items-center gap-2 border-t border-border/60 px-3 py-2">
-                        <Input
-                          value={manualInputs[provider.id] ?? ""}
-                          onChange={(e) =>
-                            setManualInputs((s) => ({
-                              ...s,
-                              [provider.id]: e.target.value,
-                            }))
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.preventDefault();
-                              addManualModel(provider.id);
-                            }
-                          }}
-                          placeholder={t("aggregate.manualModelPlaceholder", {
-                            defaultValue: "手动添加模型 ID（回车确认）",
-                          })}
-                          className="h-7 flex-1 text-xs"
-                        />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          onClick={() => addManualModel(provider.id)}
-                        >
-                          <Plus className="mr-1 h-3 w-3" />
-                          {t("aggregate.addModel", { defaultValue: "添加" })}
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
-
-          {/* 步骤 4：预览并保存 */}
-          {step === 4 && (
-            <div className="space-y-4">
-              <div className="flex items-start justify-between gap-2 rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
-                <span className="flex-1">
-                  {t("aggregate.previewHint", {
-                    defaultValue:
-                      "预览确认模型显示名、上下文长度、上游模型与协议后保存。未填写的上下文会继承成员目录或 Cube 预设（例如 kimi-k3 为 1M）；都不存在时 Codex 会回退到 128k，界面约显示 122k。",
-                  })}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge>
-                  {t("aggregate.name", { defaultValue: "名称" })}: {name || "—"}
-                </Badge>
-                <Badge variant="secondary">
-                  {t("aggregate.memberCount", {
-                    count: memberIds.length,
-                    defaultValue: `${memberIds.length} 个成员`,
-                  })}
-                </Badge>
-                <Badge variant="secondary">
-                  {t("aggregate.modelCount", {
-                    count: builtModels.length,
-                    defaultValue: `${builtModels.length} 个模型`,
-                  })}
-                </Badge>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="ml-auto h-7 px-2.5 text-xs"
-                  onClick={() => setStep(2)}
-                >
-                  <Layers className="mr-1 h-3.5 w-3.5" />
-                  {t("aggregate.editMembersModels", {
-                    defaultValue: "修改成员与模型",
-                  })}
-                </Button>
-              </div>
-              <div className="space-y-3">
-                {selectedMemberProviders.map((provider) => {
-                  const groupModels = builtModels.filter(
-                    (model) => model.providerId === provider.id,
-                  );
-                  if (groupModels.length === 0) return null;
-                  return (
-                    <div
-                      key={provider.id}
-                      className="overflow-hidden rounded-lg border border-border/60"
-                    >
-                      <div className="flex items-center gap-2 border-b border-border/60 bg-muted/20 px-3 py-2">
-                        <span className="min-w-0 truncate text-sm font-medium">
-                          {provider.name}
-                        </span>
-                        <Badge variant="secondary" className="shrink-0 text-xs">
-                          {groupModels.length}
-                        </Badge>
-                      </div>
-                      <div className="grid grid-cols-[minmax(0,1.1fr)_6.5rem_minmax(0,1fr)_minmax(0,0.9fr)] gap-2 border-b border-border/60 px-3 py-2 text-xs font-medium text-muted-foreground">
-                        <span>
-                          {t("aggregate.previewDisplayName", {
-                            defaultValue: "显示名（可编辑）",
-                          })}
-                        </span>
-                        <span>
-                          {t("aggregate.previewContextWindow", {
-                            defaultValue: "上下文",
-                          })}
-                        </span>
-                        <span>
-                          {t("aggregate.previewUpstreamModel", {
-                            defaultValue: "实际上游模型",
-                          })}
-                        </span>
-                        <span>
-                          {t("aggregate.previewApiFormat", {
-                            defaultValue: "协议",
-                          })}
-                        </span>
-                      </div>
-                      <div className="divide-y divide-border/40">
-                        {groupModels.map((model, index) => {
-                          const key = `${model.providerId}::${model.upstreamModel}`;
-                          const upstreamModel =
-                            model.upstreamModel ?? model.model;
-                          const contextWindowValue =
-                            model.contextWindow === undefined ||
-                            model.contextWindow === ""
-                              ? ""
-                              : String(model.contextWindow);
-                          return (
-                            <div
-                              key={`${key}-${index}`}
-                              className="grid grid-cols-[minmax(0,1.1fr)_6.5rem_minmax(0,1fr)_minmax(0,0.9fr)] items-center gap-2 px-3 py-2 text-sm"
-                            >
-                              <Input
-                                aria-label={t("aggregate.previewDisplayName", {
-                                  defaultValue: "显示名（可编辑）",
-                                })}
-                                value={
-                                  displayNameOverrides[key] ??
-                                  model.displayName ??
-                                  model.model
-                                }
-                                onChange={(e) =>
-                                  setDisplayNameOverrides((s) => ({
-                                    ...s,
-                                    [key]: e.target.value,
-                                  }))
-                                }
-                                className="h-7 min-w-0 text-xs"
-                              />
-                              <Input
-                                type="text"
-                                inputMode="numeric"
-                                aria-label={t(
-                                  "aggregate.previewContextWindow",
-                                  {
-                                    defaultValue: "上下文",
-                                  },
-                                )}
-                                value={contextWindowValue}
-                                onChange={(event) => {
-                                  const next = event.target.value.replace(
-                                    /[^\d]/g,
-                                    "",
-                                  );
-                                  setModelMeta((current) => {
-                                    const existing =
-                                      current[model.providerId]?.[
-                                        upstreamModel
-                                      ] ?? {};
-                                    const rest = { ...existing };
-                                    delete rest.contextWindow;
-                                    return {
-                                      ...current,
-                                      [model.providerId]: {
-                                        ...(current[model.providerId] ?? {}),
-                                        [upstreamModel]: next
-                                          ? {
-                                              ...existing,
-                                              contextWindow: Number(next),
-                                            }
-                                          : rest,
-                                      },
-                                    };
-                                  });
-                                }}
-                                placeholder="128000"
-                                className="h-7 min-w-0 px-1.5 text-xs tabular-nums"
-                              />
-                              <span
-                                className="min-w-0 truncate font-mono text-xs"
-                                title={upstreamModel}
-                              >
-                                {upstreamModel}
-                              </span>
-                              <Select
-                                value={
-                                  apiFormatOverrides[key] ??
-                                  getAggregateModelApiFormat(provider)
-                                }
-                                onValueChange={(value) => {
-                                  setApiFormatOverrides((current) => {
-                                    if (
-                                      value ===
-                                      getAggregateModelApiFormat(provider)
-                                    ) {
-                                      const next = { ...current };
-                                      delete next[key];
-                                      return next;
-                                    }
-                                    return {
-                                      ...current,
-                                      [key]: value as CodexApiFormat,
-                                    };
-                                  });
-                                }}
-                              >
-                                <SelectTrigger
-                                  aria-label={t("aggregate.previewApiFormat", {
-                                    defaultValue: "协议",
-                                  })}
-                                  className="h-7 w-full min-w-0 text-xs"
-                                >
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="openai_responses">
-                                    Responses
-                                  </SelectItem>
-                                  <SelectItem value="openai_chat">
-                                    Chat Completions
-                                  </SelectItem>
-                                  <SelectItem value="anthropic">
-                                    Anthropic Messages
-                                  </SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="grid gap-3 rounded-lg border border-border/60 bg-muted/30 p-3">
-                <div className="grid gap-2 sm:grid-cols-[180px_minmax(0,1fr)] sm:items-center">
-                  <Label className="text-xs font-medium">
-                    {t("aggregate.defaultModel", {
-                      defaultValue: "默认模型",
-                    })}
-                  </Label>
-                  <Select
-                    value={defaultModel}
-                    onValueChange={setDefaultModel}
-                    disabled={builtModels.length === 0}
-                  >
-                    <SelectTrigger
-                      className="h-8 text-xs"
-                      aria-label={t("aggregate.defaultModel", {
-                        defaultValue: "默认模型",
-                      })}
-                    >
-                      <SelectValue
-                        placeholder={t("aggregate.defaultModelPlaceholder", {
-                          defaultValue: "选择默认模型…",
-                        })}
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {builtModels.map((model) => (
-                        <SelectItem key={model.model} value={model.model}>
-                          {model.model}
-                          {model.displayName &&
-                          model.displayName !== model.model
-                            ? ` · ${model.displayName}`
-                            : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground sm:col-start-2">
-                    {t("aggregate.defaultModelHint", {
-                      defaultValue:
-                        "该模型将写入接管的 config.toml，作为 Codex 打开时的默认模型；运行时仍可按模型切换。",
-                    })}
-                  </p>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-[180px_minmax(0,1fr)] sm:items-center">
-                  <Label className="text-xs font-medium">
-                    {t("aggregate.defaultReasoningEffort", {
-                      defaultValue: "默认推理强度",
-                    })}
-                  </Label>
-                  <Select
-                    value={defaultReasoningEffort}
-                    onValueChange={(value) =>
-                      setDefaultReasoningEffort(
-                        normalizeCodexReasoningEffort(value),
-                      )
-                    }
-                  >
-                    <SelectTrigger
-                      className="h-8 text-xs"
-                      aria-label={t("aggregate.defaultReasoningEffort", {
-                        defaultValue: "默认推理强度",
-                      })}
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {CODEX_REASONING_EFFORTS.map((effort) => (
-                        <SelectItem key={effort} value={effort}>
-                          {effort}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground sm:col-start-2">
-                    {t("aggregate.defaultReasoningEffortHint", {
-                      defaultValue:
-                        "该档位将写入接管的 config.toml 的 model_reasoning_effort，作为 Codex 打开时的默认推理强度；运行时仍可按会话切换。",
-                    })}
-                  </p>
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-border/60">
-                <div className="border-b border-border/60 bg-muted/20 px-3 py-2 text-sm font-medium">
-                  {t("aggregate.configTomlTitle", {
-                    defaultValue: "对应 config.toml 文件",
-                  })}
-                </div>
-                <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-xs text-foreground/90">
-                  {buildAggregateConfigTomlPreview(
-                    name,
-                    builtModels,
-                    defaultModel,
-                    "http://127.0.0.1:15721/v1",
-                    defaultReasoningEffort,
-                  )}
-                </pre>
-              </div>
-            </div>
-          )}
-        </div>
-      </ScrollArea>
-
-      {/* 底部导航 */}
-      <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border-default bg-background py-4">
-        <Button variant="outline" disabled={isSubmitting} onClick={onCancel}>
-          {t("common.cancel", { defaultValue: "取消" })}
-        </Button>
-        <div className="flex items-center gap-2">
-          {step > 1 && (
-            <Button
-              variant="ghost"
-              disabled={isSubmitting}
-              onClick={() => setStep((s) => s - 1)}
-            >
-              <ChevronLeft className="mr-1 h-4 w-4" />
-              {t("aggregate.previous", { defaultValue: "上一步" })}
-            </Button>
-          )}
-          {step < 4 ? (
-            <Button
-              disabled={!canGoNext}
-              onClick={
-                step === 2 ? handleNextFromMembers : () => setStep((s) => s + 1)
-              }
-            >
-              {t("aggregate.next", { defaultValue: "下一步" })}
-              <ChevronRight className="ml-1 h-4 w-4" />
-            </Button>
-          ) : (
-            <Button disabled={isSubmitting} onClick={() => void handleSave()}>
-              {isSubmitting ? (
-                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-              ) : (
-                <Save className="mr-1 h-4 w-4" />
-              )}
-              {isEdit
-                ? t("common.save", { defaultValue: "保存" })
-                : t("common.add", { defaultValue: "添加" })}
-            </Button>
-          )}
-        </div>
-      </div>
     </div>
+    </Form>
   );
 }

@@ -7,15 +7,19 @@ import {
   buildAggregateModelCatalog,
   buildAggregateModels,
   buildAggregateSettingsConfig,
+  extractCodexReasoningEffortFromConfig,
   generateAggregateProviderId,
   getAggregateModelApiFormat,
   getCodexMemberWireApi,
+  hydrateAggregateConfigToml,
   isAggregateProvider,
   isResponsesCodexMember,
   knownCodexContextWindow,
   normalizeAggregateModelsForSave,
   parseAggregateSettings,
+  setCodexReasoningEffortInConfig,
 } from "@/utils/aggregateProvider";
+import { extractCodexModelName } from "@/utils/providerConfigUtils";
 
 function makeProvider(
   id: string,
@@ -218,6 +222,65 @@ describe("aggregateProvider", () => {
     });
   });
 
+  it("keeps extra config.toml keys and auth when the user edited them", () => {
+    const models = [
+      {
+        model: "deepseek-chat",
+        providerId: "deepseek",
+      },
+    ];
+    const settings = buildAggregateSettingsConfig(
+      models,
+      ["deepseek"],
+      "deepseek-chat",
+      "max",
+      {
+        auth: { OPENAI_API_KEY: "sk-test" },
+        config: `model_provider = "custom"
+model = "old-model"
+model_reasoning_effort = "low"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+
+[desktop]
+localeOverride = "zh-CN"
+`,
+      },
+    );
+    expect(settings.auth).toEqual({ OPENAI_API_KEY: "sk-test" });
+    expect(settings.config).toContain('model = "deepseek-chat"');
+    expect(settings.config).toContain('model_reasoning_effort = "max"');
+    expect(settings.config).toContain('localeOverride = "zh-CN"');
+    expect(extractCodexReasoningEffortFromConfig(String(settings.config))).toBe(
+      "max",
+    );
+  });
+
+  it("injects default model_reasoning_effort into an existing config.toml that lacks it", () => {
+    const settings = buildAggregateSettingsConfig(
+      [{ model: "deepseek-chat", providerId: "deepseek" }],
+      ["deepseek"],
+      "deepseek-chat",
+      "",
+      {
+        config: `model_provider = "custom"
+model = "deepseek-chat"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+`,
+      },
+    );
+    expect(settings.defaultReasoningEffort).toBe("high");
+    expect(settings.config).toContain('model_reasoning_effort = "high"');
+    expect(extractCodexReasoningEffortFromConfig(String(settings.config))).toBe(
+      "high",
+    );
+  });
+
   it("honors an explicit default model in settings and preview", () => {
     const models = [
       {
@@ -300,6 +363,59 @@ describe("aggregateProvider", () => {
     expect(parsed.models[1].providerId).toBe("kimi");
   });
 
+  it("hydrates missing model_reasoning_effort into the provider config.toml", () => {
+    const hydrated = hydrateAggregateConfigToml(
+      `model_provider = "custom"
+model = "gpt-5.6-sol"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+`,
+      "gpt-5.6-sol",
+      "low",
+    );
+    expect(hydrated).toContain('model = "gpt-5.6-sol"');
+    expect(hydrated).toContain('model_reasoning_effort = "low"');
+    expect(extractCodexReasoningEffortFromConfig(hydrated)).toBe("low");
+    expect(hydrated.match(/^\s*model_reasoning_effort\s*=/gm)).toHaveLength(1);
+  });
+
+  it("collapses duplicate model_reasoning_effort keys to a single assignment", () => {
+    const input = `model_provider = "custom"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+model_reasoning_effort = "low"
+model_reasoning_effort = "low"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+
+[agents]
+default_subagent_reasoning_effort = "max"
+`;
+    const result = setCodexReasoningEffortInConfig(input, "max");
+    expect(result.match(/^\s*model_reasoning_effort\s*=/gm)).toHaveLength(1);
+    expect(extractCodexReasoningEffortFromConfig(result)).toBe("max");
+    expect(result).toContain('model = "gpt-5.6-sol"');
+    expect(result).toContain('default_subagent_reasoning_effort = "max"');
+
+    const saved = buildAggregateSettingsConfig(
+      [{ model: "gpt-5.6-sol", providerId: "opencode" }],
+      ["opencode"],
+      "gpt-5.6-sol",
+      "high",
+      { config: input },
+    );
+    expect(String(saved.config).match(/^\s*model_reasoning_effort\s*=/gm)).toHaveLength(
+      1,
+    );
+    expect(extractCodexReasoningEffortFromConfig(String(saved.config))).toBe(
+      "high",
+    );
+  });
+
   it("parses default reasoning effort from settings key or config.toml", () => {
     expect(
       parseAggregateSettings({
@@ -319,6 +435,42 @@ describe("aggregateProvider", () => {
         aggregateModels: [{ model: "kimi-k3", providerId: "kimi" }],
       }).defaultReasoningEffort,
     ).toBe("max");
+    expect(
+      parseAggregateSettings({
+        config: 'model = "deepseek-v4-flash"\nmodel_reasoning_effort = "low"\n',
+        aggregateModels: [
+          { model: "gpt-5.6-sol", providerId: "opencode" },
+          { model: "deepseek-v4-flash", providerId: "opencode" },
+        ],
+      }).defaultModel,
+    ).toBe("deepseek-v4-flash");
+  });
+
+  it("overwrites stale extras.config with the form default model and reasoning", () => {
+    const models = [
+      { model: "gpt-5.6-sol", providerId: "opencode" },
+      { model: "deepseek-v4-flash", providerId: "opencode" },
+    ];
+    const saved = buildAggregateSettingsConfig(
+      models,
+      ["opencode"],
+      "deepseek-v4-flash",
+      "low",
+      {
+        config: `model_provider = "custom"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+`,
+      },
+    );
+    expect(saved.defaultModel).toBe("deepseek-v4-flash");
+    expect(saved.defaultReasoningEffort).toBe("low");
+    expect(extractCodexModelName(String(saved.config))).toBe(
+      "deepseek-v4-flash",
+    );
+    expect(extractCodexReasoningEffortFromConfig(String(saved.config))).toBe(
+      "low",
+    );
   });
 
   it("generates stable aggregate provider ids", () => {
