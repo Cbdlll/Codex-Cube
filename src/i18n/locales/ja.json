@@ -1883,6 +1883,7 @@
     "previewDisplayName": "表示名（編集可）",
     "previewUpstreamModel": "実際の上流モデル",
     "previewApiFormat": "プロトコル",
+    "previewContextWindow": "コンテキスト",
     "step": {
       "basic": "基本情報",
       "members": "メンバー選択",

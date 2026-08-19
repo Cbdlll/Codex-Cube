@@ -50,6 +50,7 @@ import {
   getAggregateModelApiFormat,
   getCodexMemberCredentials,
   getCodexMemberWireApi,
+  knownCodexContextWindow,
   normalizeAggregateModelsForSave,
   parseAggregateSettings,
 } from "@/utils/aggregateProvider";
@@ -438,8 +439,10 @@ export function AggregateProviderWizard({
         const catalogMeta = aggregateMetaFromCatalogEntry(
           catalogModels.find((entry) => entry?.model === model),
         );
-        if (meta || catalogMeta) {
+        const knownWindow = knownCodexContextWindow(model);
+        if (meta || catalogMeta || knownWindow) {
           metaByKey[`${provider.id}::${model}`] = {
+            ...(knownWindow ? { contextWindow: knownWindow } : {}),
             ...(catalogMeta ?? {}),
             ...(meta ?? {}),
           };
@@ -1003,7 +1006,8 @@ export function AggregateProviderWizard({
               <div className="flex items-start justify-between gap-2 rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
                 <span className="flex-1">
                   {t("aggregate.previewHint", {
-                    defaultValue: "预览确认模型显示名、上游模型与协议后保存。",
+                    defaultValue:
+                      "预览确认模型显示名、上下文长度、上游模型与协议后保存。未填写的上下文会继承成员目录或 Cube 预设（例如 kimi-k3 为 1M）；都不存在时 Codex 会回退到 128k，界面约显示 122k。",
                   })}
                 </span>
               </div>
@@ -1054,10 +1058,15 @@ export function AggregateProviderWizard({
                           {groupModels.length}
                         </Badge>
                       </div>
-                      <div className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(0,1fr)] gap-2 border-b border-border/60 px-3 py-2 text-xs font-medium text-muted-foreground">
+                      <div className="grid grid-cols-[minmax(0,1.1fr)_6.5rem_minmax(0,1fr)_minmax(0,0.9fr)] gap-2 border-b border-border/60 px-3 py-2 text-xs font-medium text-muted-foreground">
                         <span>
                           {t("aggregate.previewDisplayName", {
                             defaultValue: "显示名（可编辑）",
+                          })}
+                        </span>
+                        <span>
+                          {t("aggregate.previewContextWindow", {
+                            defaultValue: "上下文",
                           })}
                         </span>
                         <span>
@@ -1076,10 +1085,15 @@ export function AggregateProviderWizard({
                           const key = `${model.providerId}::${model.upstreamModel}`;
                           const upstreamModel =
                             model.upstreamModel ?? model.model;
+                          const contextWindowValue =
+                            model.contextWindow === undefined ||
+                            model.contextWindow === ""
+                              ? ""
+                              : String(model.contextWindow);
                           return (
                             <div
                               key={`${key}-${index}`}
-                              className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(0,1fr)] items-center gap-2 px-3 py-2 text-sm"
+                              className="grid grid-cols-[minmax(0,1.1fr)_6.5rem_minmax(0,1fr)_minmax(0,0.9fr)] items-center gap-2 px-3 py-2 text-sm"
                             >
                               <Input
                                 aria-label={t("aggregate.previewDisplayName", {
@@ -1097,6 +1111,45 @@ export function AggregateProviderWizard({
                                   }))
                                 }
                                 className="h-7 min-w-0 text-xs"
+                              />
+                              <Input
+                                type="text"
+                                inputMode="numeric"
+                                aria-label={t(
+                                  "aggregate.previewContextWindow",
+                                  {
+                                    defaultValue: "上下文",
+                                  },
+                                )}
+                                value={contextWindowValue}
+                                onChange={(event) => {
+                                  const next = event.target.value.replace(
+                                    /[^\d]/g,
+                                    "",
+                                  );
+                                  setModelMeta((current) => {
+                                    const existing =
+                                      current[model.providerId]?.[
+                                        upstreamModel
+                                      ] ?? {};
+                                    const rest = { ...existing };
+                                    delete rest.contextWindow;
+                                    return {
+                                      ...current,
+                                      [model.providerId]: {
+                                        ...(current[model.providerId] ?? {}),
+                                        [upstreamModel]: next
+                                          ? {
+                                              ...existing,
+                                              contextWindow: Number(next),
+                                            }
+                                          : rest,
+                                      },
+                                    };
+                                  });
+                                }}
+                                placeholder="128000"
+                                className="h-7 min-w-0 px-1.5 text-xs tabular-nums"
                               />
                               <span
                                 className="min-w-0 truncate font-mono text-xs"

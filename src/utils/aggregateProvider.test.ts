@@ -12,6 +12,7 @@ import {
   getCodexMemberWireApi,
   isAggregateProvider,
   isResponsesCodexMember,
+  knownCodexContextWindow,
   normalizeAggregateModelsForSave,
   parseAggregateSettings,
 } from "@/utils/aggregateProvider";
@@ -329,6 +330,12 @@ describe("aggregateProvider", () => {
       model: "kimi-k2",
       contextWindow: 131072,
     });
+  });
+
+  it("knows Cube preset context windows and strips collision suffixes", () => {
+    expect(knownCodexContextWindow("kimi-k3")).toBe(1048576);
+    expect(knownCodexContextWindow("kimi-k3@kimi")).toBe(1048576);
+    expect(knownCodexContextWindow("kimi-k2")).toBeUndefined();
   });
 
   it("detects aggregate providers by meta.providerType", () => {

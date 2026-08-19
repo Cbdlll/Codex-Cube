@@ -30,6 +30,36 @@ export interface AggregateModelMeta {
   baseInstructions?: string;
 }
 
+/**
+ * Cube 预设 / 官方 Codex 已知上下文窗口。聚合映射未声明 contextWindow 时
+ * 用这些值，避免生成目录时回退到 128k（Desktop 再按 95% 显示成约 122k）。
+ * 冲突 slug `model@provider` 按裸模型 id 查找。
+ */
+const KNOWN_CODEX_CONTEXT_WINDOWS: Record<string, number> = {
+  "gpt-5.6-sol": 272000,
+  "gpt-5.6-terra": 272000,
+  "gpt-5.6-luna": 272000,
+  "gpt-5.5": 272000,
+  "gpt-5.4": 272000,
+  "gpt-5.4-mini": 272000,
+  "gpt-5.2": 272000,
+  "kimi-k3": 1048576,
+  "kimi-k2.7-code": 262144,
+  "kimi-for-coding": 262144,
+  "deepseek-v4-flash": 1048576,
+  "deepseek-v4-pro": 1048576,
+  "grok-4.5": 500000,
+  "grok-4.6": 500000,
+  "mimo-v2.5": 1048576,
+  "mimo-v2.5-pro": 1048576,
+};
+
+/** 已知模型的上下文窗口；未收录时返回 undefined（由 catalog 生成回退 128k）。 */
+export function knownCodexContextWindow(model: string): number | undefined {
+  const id = model.trim().split("@")[0]?.trim() ?? "";
+  return id ? KNOWN_CODEX_CONTEXT_WINDOWS[id] : undefined;
+}
+
 function normalizeCodexApiFormat(value: unknown): CodexApiFormat | undefined {
   const format = String(value ?? "")
     .trim()

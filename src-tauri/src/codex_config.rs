@@ -829,31 +829,40 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
     specs
 }
 
-/// Known official Codex context windows for bundled GPT model slots
-/// (`codex debug models --bundled`, Codex CLI 0.147). Used as an automatic
-/// fallback when a provider / aggregate mapping does not declare model
-/// metadata, so GPT slots do not regress to the conservative 128k default.
-/// Explicit per-model `contextWindow` and a top-level `model_context_window`
-/// in config.toml both take precedence.
-fn codex_official_context_window(model: &str) -> Option<u64> {
+/// Known context windows when a provider / aggregate mapping omits metadata.
+///
+/// GPT slots use the official Codex bundled windows (`codex debug models
+/// --bundled`, Codex CLI 0.147). Third-party ids match Cube's built-in
+/// presets so aggregate catalogs do not regress to the conservative 128k
+/// default (Desktop then shows ~122k via `effective_context_window_percent`
+/// 95). Explicit per-model `contextWindow` and a top-level
+/// `model_context_window` in config.toml both take precedence. Collision
+/// slugs `model@provider` look up the bare model id.
+fn codex_known_context_window(model: &str) -> Option<u64> {
+    let model = model.split('@').next().unwrap_or(model).trim();
     match model {
         "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5" | "gpt-5.4"
         | "gpt-5.4-mini" | "gpt-5.2" => Some(272_000),
+        "kimi-k3" => Some(1_048_576),
+        "kimi-k2.7-code" | "kimi-for-coding" => Some(262_144),
+        "deepseek-v4-flash" | "deepseek-v4-pro" => Some(1_048_576),
+        "grok-4.5" | "grok-4.6" => Some(500_000),
+        "mimo-v2.5" | "mimo-v2.5-pro" => Some(1_048_576),
         _ => None,
     }
 }
 
 /// Resolve the effective default context window for one catalog model:
-/// explicit top-level `model_context_window` in config.toml wins, then the
-/// known official Codex value for bundled GPT slots, then 128k.
+/// explicit top-level `model_context_window` in config.toml wins, then a
+/// known Cube/official window, then 128k.
 fn codex_default_context_window_for_model(model: &str, config_text: &str) -> u64 {
     extract_codex_top_level_u64(config_text, "model_context_window")
-        .or_else(|| codex_official_context_window(model))
+        .or_else(|| codex_known_context_window(model))
         .unwrap_or(128_000)
 }
 
 /// Fill unset `context_window` on catalog specs so aggregate / relay providers
-/// automatically inherit the official model window instead of 128k.
+/// inherit a known Cube/official window instead of 128k.
 fn codex_catalog_model_specs_with_default_context(
     specs: Vec<CodexCatalogModelSpec>,
     config_text: &str,
@@ -3771,7 +3780,10 @@ command = "noop"
             parsed.get("model").and_then(|v| v.as_str()),
             Some("gpt-5.4")
         );
-        assert!(parsed.get("mcp_servers").and_then(|v| v.get("echo")).is_some());
+        assert!(parsed
+            .get("mcp_servers")
+            .and_then(|v| v.get("echo"))
+            .is_some());
         assert!(parsed
             .get("mcp")
             .and_then(|v| v.get("servers"))
@@ -3786,10 +3798,7 @@ command = "noop"
             "config": "model = \"gpt-5.5\"\n\n[mcp_servers.echo]\ncommand = \"echo\"\n",
         });
         restore_codex_settings_for_backfill(&mut live_settings, &json!({}), false).unwrap();
-        let config = live_settings
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap();
+        let config = live_settings.get("config").and_then(Value::as_str).unwrap();
         assert!(!config.contains("mcp_servers"), "got: {config}");
         assert!(config.contains("model = \"gpt-5.5\""));
     }
@@ -4608,6 +4617,7 @@ base_url = "https://production.api/v1"
                     { "model": "gpt-5.6-sol", "displayName": "gpt-5.6-sol" },
                     { "model": "gpt-5.5", "displayName": "gpt-5.5" },
                     { "model": "kimi-k2", "displayName": "Kimi K2" },
+                    { "model": "kimi-k3", "displayName": "Kimi K3" },
                     { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "contextWindow": 1048576 }
                 ]
             }
@@ -4642,7 +4652,12 @@ base_url = "https://production.api/v1"
         assert_eq!(
             window("kimi-k2"),
             Some(128_000),
-            "non-GPT slot without metadata keeps 128k fallback"
+            "unknown non-GPT slot without metadata keeps 128k fallback"
+        );
+        assert_eq!(
+            window("kimi-k3"),
+            Some(1_048_576),
+            "kimi-k3 inherits the Cube preset 1M window instead of 128k"
         );
         assert_eq!(
             window("deepseek-v4-flash"),

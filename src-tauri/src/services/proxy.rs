@@ -35,6 +35,26 @@ pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
 }
 
+fn copy_missing_catalog_meta_field(
+    obj: &mut serde_json::Map<String, Value>,
+    meta: &Value,
+    member_key: &str,
+    catalog_key: &str,
+) {
+    let value = meta.get(member_key).or_else(|| meta.get(catalog_key));
+    let missing = match obj.get(member_key).or_else(|| obj.get(catalog_key)) {
+        Some(existing) => {
+            existing.is_null() || existing.as_str().is_some_and(|text| text.trim().is_empty())
+        }
+        None => true,
+    };
+    if missing {
+        if let Some(value) = value {
+            obj.insert(member_key.to_string(), value.clone());
+        }
+    }
+}
+
 impl ProxyService {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
@@ -2185,18 +2205,31 @@ impl ProxyService {
                 ("inputModalities", "input_modalities"),
                 ("baseInstructions", "base_instructions"),
             ] {
-                let value = meta.get(member_key).or_else(|| meta.get(catalog_key));
-                let missing = match obj.get(member_key).or_else(|| obj.get(catalog_key)) {
-                    Some(existing) => {
-                        existing.is_null()
-                            || existing.as_str().is_some_and(|text| text.trim().is_empty())
-                    }
-                    None => true,
+                copy_missing_catalog_meta_field(obj, meta, member_key, catalog_key);
+            }
+        }
+
+        if let Some(rows) = enriched
+            .get_mut("aggregateModels")
+            .and_then(Value::as_array_mut)
+        {
+            for row in rows {
+                let Some(slot) = row.get("model").and_then(Value::as_str) else {
+                    continue;
                 };
-                if missing {
-                    if let Some(value) = value {
-                        obj.insert(member_key.to_string(), value.clone());
-                    }
+                let Some(meta) = meta_by_slot.get(slot) else {
+                    continue;
+                };
+                let Some(obj) = row.as_object_mut() else {
+                    continue;
+                };
+                for (member_key, catalog_key) in [
+                    ("contextWindow", "context_window"),
+                    ("supportsParallelToolCalls", "supports_parallel_tool_calls"),
+                    ("inputModalities", "input_modalities"),
+                    ("baseInstructions", "base_instructions"),
+                ] {
+                    copy_missing_catalog_meta_field(obj, meta, member_key, catalog_key);
                 }
             }
         }
@@ -6389,5 +6422,14 @@ experimental_bearer_token = "PROXY_MANAGED"
             .find(|m| m["model"] == "glm-5")
             .expect("glm row");
         assert!(glm.get("contextWindow").is_none());
+
+        let aggregate_rows = enriched["aggregateModels"]
+            .as_array()
+            .expect("aggregateModels");
+        let flash_mapping = aggregate_rows
+            .iter()
+            .find(|m| m["model"] == "deepseek-v4-flash")
+            .expect("flash mapping");
+        assert_eq!(flash_mapping["contextWindow"], 1048576);
     }
 }
