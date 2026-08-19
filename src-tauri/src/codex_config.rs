@@ -2715,6 +2715,18 @@ pub fn build_aggregate_takeover_toml(
         }
     }
 
+    // 默认推理强度与普通供应商一致：写入顶层 `model_reasoning_effort`。
+    // 优先级：向导显式保存的 defaultReasoningEffort > 现有 config.toml
+    //（保留桌面端当前选择）> high。
+    let effort = settings_default_reasoning_effort(&provider.settings_config)
+        .or_else(|| {
+            doc.get("model_reasoning_effort")
+                .and_then(toml_edit::Item::as_str)
+                .and_then(normalize_codex_reasoning_effort)
+        })
+        .unwrap_or("high");
+    doc["model_reasoning_effort"] = toml_edit::value(effort);
+
     // 顶层 base_url 属于接管前的旧供应商；聚合路由只走 [model_providers.custom]。
     doc.as_table_mut().remove("base_url");
 
@@ -3040,6 +3052,31 @@ const CODEX_AGGREGATE_CACHE_BACKUP_FILENAME: &str = "models_cache.codex-cube-bac
 /// custom catalog entry receives the same six GPT-compatible levels instead of
 /// inheriting a provider's partial catalog.
 const DESKTOP_REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+
+fn normalize_codex_reasoning_effort(value: &str) -> Option<&'static str> {
+    let effort = value.trim();
+    DESKTOP_REASONING_EFFORTS
+        .iter()
+        .copied()
+        .find(|item| *item == effort)
+}
+
+/// 聚合供应商向导保存的默认推理强度；无效值视为未设置。
+fn settings_default_reasoning_effort(settings: &Value) -> Option<&'static str> {
+    if let Some(effort) = settings
+        .get("defaultReasoningEffort")
+        .or_else(|| settings.get("default_reasoning_effort"))
+        .and_then(Value::as_str)
+        .and_then(normalize_codex_reasoning_effort)
+    {
+        return Some(effort);
+    }
+    let config = settings.get("config").and_then(Value::as_str)?;
+    let doc = config.parse::<DocumentMut>().ok()?;
+    doc.get("model_reasoning_effort")
+        .and_then(toml_edit::Item::as_str)
+        .and_then(normalize_codex_reasoning_effort)
+}
 
 /// Normalize generated `model_catalog_json` and `models_cache.json` entries to
 /// the Desktop-supported reasoning effort set.
@@ -6143,6 +6180,11 @@ model_catalog_json = "codex-cube-model-catalog.json"
             Some("http://127.0.0.1:15721/v1")
         );
         assert_eq!(custom["wire_api"].as_str(), Some("responses"));
+        assert_eq!(
+            parsed["model_reasoning_effort"].as_str(),
+            Some("high"),
+            "aggregate takeover should default reasoning effort like ordinary providers"
+        );
         assert!(
             parsed.get("base_url").is_none(),
             "aggregate config must not rely on a top-level base_url"
@@ -6309,6 +6351,83 @@ base_url = "http://127.0.0.1:9999/v1"
             parsed["model"].as_str(),
             Some("gpt-5.5@neko"),
             "invalid explicit default must fall back to the existing valid model"
+        );
+    }
+
+    #[test]
+    fn aggregate_build_takeover_toml_prefers_explicit_default_reasoning_effort() {
+        let provider = crate::provider::Provider::with_id(
+            "agg-1".to_string(),
+            "My Aggregate".to_string(),
+            json!({
+                "defaultReasoningEffort": "max",
+                "aggregateModels": [
+                    { "model": "gpt-5.5@neko", "providerId": "neko", "upstreamModel": "gpt-5.5" }
+                ]
+            }),
+            None,
+        );
+        let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.5@neko\"\nmodel_reasoning_effort = \"low\"\n";
+        let toml_text =
+            build_aggregate_takeover_toml(&provider, "http://127.0.0.1:15721/v1", existing)
+                .expect("build aggregate takeover toml");
+        let parsed: toml::Value = toml::from_str(&toml_text).expect("valid TOML");
+
+        assert_eq!(
+            parsed["model_reasoning_effort"].as_str(),
+            Some("max"),
+            "wizard-selected default reasoning effort must win"
+        );
+    }
+
+    #[test]
+    fn aggregate_build_takeover_toml_preserves_live_reasoning_effort_without_explicit() {
+        let provider = crate::provider::Provider::with_id(
+            "agg-1".to_string(),
+            "My Aggregate".to_string(),
+            json!({
+                "aggregateModels": [
+                    { "model": "gpt-5.5@neko", "providerId": "neko", "upstreamModel": "gpt-5.5" }
+                ]
+            }),
+            None,
+        );
+        let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.5@neko\"\nmodel_reasoning_effort = \"xhigh\"\n";
+        let toml_text =
+            build_aggregate_takeover_toml(&provider, "http://127.0.0.1:15721/v1", existing)
+                .expect("build aggregate takeover toml");
+        let parsed: toml::Value = toml::from_str(&toml_text).expect("valid TOML");
+
+        assert_eq!(
+            parsed["model_reasoning_effort"].as_str(),
+            Some("xhigh"),
+            "live Desktop reasoning effort must survive when the wizard has no explicit default"
+        );
+    }
+
+    #[test]
+    fn aggregate_build_takeover_toml_reads_reasoning_effort_from_stored_config() {
+        let provider = crate::provider::Provider::with_id(
+            "agg-1".to_string(),
+            "My Aggregate".to_string(),
+            json!({
+                "config": "model_provider = \"custom\"\nmodel = \"gpt-5.5@neko\"\nmodel_reasoning_effort = \"ultra\"\n",
+                "aggregateModels": [
+                    { "model": "gpt-5.5@neko", "providerId": "neko", "upstreamModel": "gpt-5.5" }
+                ]
+            }),
+            None,
+        );
+        let existing = "model_provider = \"custom\"\nmodel = \"gpt-5.5@neko\"\nmodel_reasoning_effort = \"low\"\n";
+        let toml_text =
+            build_aggregate_takeover_toml(&provider, "http://127.0.0.1:15721/v1", existing)
+                .expect("build aggregate takeover toml");
+        let parsed: toml::Value = toml::from_str(&toml_text).expect("valid TOML");
+
+        assert_eq!(
+            parsed["model_reasoning_effort"].as_str(),
+            Some("ultra"),
+            "stored aggregate config.toml must supply the default when the dedicated key is absent"
         );
     }
 

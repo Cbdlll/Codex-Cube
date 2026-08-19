@@ -19,6 +19,39 @@ export const AGGREGATE_MODELS_KEY = "aggregateModels";
 export const AGGREGATE_MEMBERS_KEY = "memberProviderIds";
 /** 聚合 Provider settingsConfig 中默认模型（写入 config.toml 的 model）的键。 */
 export const AGGREGATE_DEFAULT_MODEL_KEY = "defaultModel";
+/** 聚合 Provider settingsConfig 中默认推理强度（写入 config.toml 的 model_reasoning_effort）的键。 */
+export const AGGREGATE_DEFAULT_REASONING_EFFORT_KEY = "defaultReasoningEffort";
+
+/** Codex Desktop 支持的推理档位，与普通供应商 config.toml / 模型目录一致。 */
+export const CODEX_REASONING_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
+
+export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
+
+const DEFAULT_CODEX_REASONING_EFFORT: CodexReasoningEffort = "high";
+
+export function normalizeCodexReasoningEffort(
+  value: unknown,
+): CodexReasoningEffort {
+  const effort = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return (CODEX_REASONING_EFFORTS as readonly string[]).includes(effort)
+    ? (effort as CodexReasoningEffort)
+    : DEFAULT_CODEX_REASONING_EFFORT;
+}
+
+function reasoningEffortFromConfigToml(configText: string): string | undefined {
+  const match = configText.match(/^\s*model_reasoning_effort\s*=\s*"([^"]+)"/m);
+  const effort = match?.[1]?.trim();
+  return effort || undefined;
+}
 
 export type CodexMemberWireApi = "responses" | "chat" | "anthropic";
 
@@ -336,11 +369,14 @@ export function buildAggregateSettingsConfig(
   models: AggregateProviderModel[],
   memberProviderIds: string[],
   defaultModel = "",
+  defaultReasoningEffort = "",
 ): Record<string, unknown> {
   const resolvedDefault =
     defaultModel.trim() || models[0]?.model.trim() || "gpt-5.6-sol";
+  const resolvedEffort = normalizeCodexReasoningEffort(defaultReasoningEffort);
   const config = `model_provider = "custom"
 model = ${JSON.stringify(resolvedDefault)}
+model_reasoning_effort = ${JSON.stringify(resolvedEffort)}
 
 [model_providers.custom]
 name = "custom"
@@ -352,6 +388,7 @@ requires_openai_auth = true`;
     [AGGREGATE_MEMBERS_KEY]: memberProviderIds,
     [AGGREGATE_MODELS_KEY]: models,
     [AGGREGATE_DEFAULT_MODEL_KEY]: resolvedDefault,
+    [AGGREGATE_DEFAULT_REASONING_EFFORT_KEY]: resolvedEffort,
     modelCatalog: buildAggregateModelCatalog(models),
   };
 }
@@ -362,15 +399,18 @@ export function buildAggregateConfigTomlPreview(
   models: AggregateProviderModel[],
   defaultModel = "",
   proxyBaseUrl = "http://127.0.0.1:15721/v1",
+  defaultReasoningEffort = "",
 ): string {
   const resolvedDefault =
     defaultModel.trim() ||
     models
       .map((model) => model.model.trim())
       .find((model) => model.length > 0) || "gpt-5.6-sol";
+  const resolvedEffort = normalizeCodexReasoningEffort(defaultReasoningEffort);
   return [
     'model_provider = "custom"',
     `model = ${JSON.stringify(resolvedDefault)}`,
+    `model_reasoning_effort = ${JSON.stringify(resolvedEffort)}`,
     "",
     "[model_providers.custom]",
     `name = ${JSON.stringify(name.trim() || "custom")}`,
@@ -386,6 +426,7 @@ export function parseAggregateSettings(settingsConfig: Record<string, any>): {
   memberProviderIds: string[];
   models: AggregateProviderModel[];
   defaultModel: string;
+  defaultReasoningEffort: CodexReasoningEffort;
 } {
   const memberProviderIds = Array.isArray(settingsConfig[AGGREGATE_MEMBERS_KEY])
     ? settingsConfig[AGGREGATE_MEMBERS_KEY].map((id: unknown) =>
@@ -453,7 +494,14 @@ export function parseAggregateSettings(settingsConfig: Record<string, any>): {
     typeof settingsConfig[AGGREGATE_DEFAULT_MODEL_KEY] === "string"
       ? settingsConfig[AGGREGATE_DEFAULT_MODEL_KEY].trim()
       : models[0]?.model.trim() ?? "";
-  return { memberProviderIds, models, defaultModel };
+  const storedEffort =
+    settingsConfig[AGGREGATE_DEFAULT_REASONING_EFFORT_KEY] ??
+    settingsConfig.default_reasoning_effort ??
+    (typeof settingsConfig.config === "string"
+      ? reasoningEffortFromConfigToml(settingsConfig.config)
+      : undefined);
+  const defaultReasoningEffort = normalizeCodexReasoningEffort(storedEffort);
+  return { memberProviderIds, models, defaultModel, defaultReasoningEffort };
 }
 
 /** 由名称生成稳定的聚合 Provider id（如 aggregate-deepseek-kimi）。 */

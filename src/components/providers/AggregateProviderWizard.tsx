@@ -46,13 +46,16 @@ import {
   buildAggregateConfigTomlPreview,
   buildAggregateModels,
   buildAggregateSettingsConfig,
+  CODEX_REASONING_EFFORTS,
   generateAggregateProviderId,
   getAggregateModelApiFormat,
   getCodexMemberCredentials,
   getCodexMemberWireApi,
   knownCodexContextWindow,
   normalizeAggregateModelsForSave,
+  normalizeCodexReasoningEffort,
   parseAggregateSettings,
+  type CodexReasoningEffort,
 } from "@/utils/aggregateProvider";
 
 const STEPS = [
@@ -126,6 +129,9 @@ export function AggregateProviderWizard({
   const [manualInputs, setManualInputs] = useState<Record<string, string>>({});
   /** 聚合 Provider 的默认模型：写入接管 config.toml 的 model，可在预览步骤选择。 */
   const [defaultModel, setDefaultModel] = useState("");
+  /** 聚合 Provider 的默认推理强度：写入接管 config.toml 的 model_reasoning_effort。 */
+  const [defaultReasoningEffort, setDefaultReasoningEffort] =
+    useState<CodexReasoningEffort>("high");
 
   // 编辑模式直接落在「预览并保存」步骤：用户点编辑立刻看到已保存的成员/模型，
   // 而不是看起来像新建的初始化流程；通过「上一步 / 修改成员与模型」再调整。
@@ -174,12 +180,17 @@ export function AggregateProviderWizard({
   // 编辑模式回填
   useEffect(() => {
     if (!initialProvider) return;
-    const { memberProviderIds, models, defaultModel: savedDefault } =
-      parseAggregateSettings(
+    const {
+      memberProviderIds,
+      models,
+      defaultModel: savedDefault,
+      defaultReasoningEffort: savedEffort,
+    } = parseAggregateSettings(
       initialProvider.settingsConfig as Record<string, any>,
-      );
+    );
     setMemberIds(memberProviderIds);
     setDefaultModel(savedDefault);
+    setDefaultReasoningEffort(savedEffort);
     const sel: Record<string, Set<string>> = {};
     const manual: Record<string, string[]> = {};
     const overrides: Record<string, string> = {};
@@ -525,6 +536,7 @@ export function AggregateProviderWizard({
       normalized,
       memberIds,
       defaultModel,
+      defaultReasoningEffort,
     );
     const meta: Provider["meta"] = {
       ...(initialProvider?.meta ?? {}),
@@ -562,6 +574,7 @@ export function AggregateProviderWizard({
     builtModels,
     memberIds,
     defaultModel,
+    defaultReasoningEffort,
     name,
     notes,
     websiteUrl,
@@ -1208,47 +1221,86 @@ export function AggregateProviderWizard({
                 })}
               </div>
 
-              <div className="grid gap-2 sm:grid-cols-[180px_minmax(0,1fr)] sm:items-center rounded-lg border border-border/60 bg-muted/30 p-3">
-                <Label className="text-xs font-medium">
-                  {t("aggregate.defaultModel", {
-                    defaultValue: "默认模型",
-                  })}
-                </Label>
-                <Select
-                  value={defaultModel}
-                  onValueChange={setDefaultModel}
-                  disabled={builtModels.length === 0}
-                >
-                  <SelectTrigger
-                    className="h-8 text-xs"
-                    aria-label={t("aggregate.defaultModel", {
+              <div className="grid gap-3 rounded-lg border border-border/60 bg-muted/30 p-3">
+                <div className="grid gap-2 sm:grid-cols-[180px_minmax(0,1fr)] sm:items-center">
+                  <Label className="text-xs font-medium">
+                    {t("aggregate.defaultModel", {
                       defaultValue: "默认模型",
                     })}
+                  </Label>
+                  <Select
+                    value={defaultModel}
+                    onValueChange={setDefaultModel}
+                    disabled={builtModels.length === 0}
                   >
-                    <SelectValue
-                      placeholder={t("aggregate.defaultModelPlaceholder", {
-                        defaultValue: "选择默认模型…",
+                    <SelectTrigger
+                      className="h-8 text-xs"
+                      aria-label={t("aggregate.defaultModel", {
+                        defaultValue: "默认模型",
                       })}
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {builtModels.map((model) => (
-                      <SelectItem key={model.model} value={model.model}>
-                        {model.model}
-                        {model.displayName &&
-                        model.displayName !== model.model
-                          ? ` · ${model.displayName}`
-                          : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground sm:col-start-2">
-                  {t("aggregate.defaultModelHint", {
-                    defaultValue:
-                      "该模型将写入接管的 config.toml，作为 Codex 打开时的默认模型；运行时仍可按模型切换。",
-                  })}
-                </p>
+                    >
+                      <SelectValue
+                        placeholder={t("aggregate.defaultModelPlaceholder", {
+                          defaultValue: "选择默认模型…",
+                        })}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {builtModels.map((model) => (
+                        <SelectItem key={model.model} value={model.model}>
+                          {model.model}
+                          {model.displayName &&
+                          model.displayName !== model.model
+                            ? ` · ${model.displayName}`
+                            : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground sm:col-start-2">
+                    {t("aggregate.defaultModelHint", {
+                      defaultValue:
+                        "该模型将写入接管的 config.toml，作为 Codex 打开时的默认模型；运行时仍可按模型切换。",
+                    })}
+                  </p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-[180px_minmax(0,1fr)] sm:items-center">
+                  <Label className="text-xs font-medium">
+                    {t("aggregate.defaultReasoningEffort", {
+                      defaultValue: "默认推理强度",
+                    })}
+                  </Label>
+                  <Select
+                    value={defaultReasoningEffort}
+                    onValueChange={(value) =>
+                      setDefaultReasoningEffort(
+                        normalizeCodexReasoningEffort(value),
+                      )
+                    }
+                  >
+                    <SelectTrigger
+                      className="h-8 text-xs"
+                      aria-label={t("aggregate.defaultReasoningEffort", {
+                        defaultValue: "默认推理强度",
+                      })}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CODEX_REASONING_EFFORTS.map((effort) => (
+                        <SelectItem key={effort} value={effort}>
+                          {effort}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground sm:col-start-2">
+                    {t("aggregate.defaultReasoningEffortHint", {
+                      defaultValue:
+                        "该档位将写入接管的 config.toml 的 model_reasoning_effort，作为 Codex 打开时的默认推理强度；运行时仍可按会话切换。",
+                    })}
+                  </p>
+                </div>
               </div>
 
               <div className="rounded-lg border border-border/60">
@@ -1262,6 +1314,8 @@ export function AggregateProviderWizard({
                     name,
                     builtModels,
                     defaultModel,
+                    "http://127.0.0.1:15721/v1",
+                    defaultReasoningEffort,
                   )}
                 </pre>
               </div>

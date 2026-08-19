@@ -1914,6 +1914,8 @@
     "slotHelpBody": "Codex Desktop 只有 7 個固定的模型位置（例如 gpt-5.6-sol、gpt-5.4），而且只會顯示這些固定位置上的模型。\n\n第三方模型沒有自己的位置，如果不指定位置，Desktop 裡會顯示成「custom」，無法正常顯示模型名稱。所以需要讓第三方模型佔用其中一個固定位置，顯示時就會用這個位置的名稱出現（原來的模型會暫時被替換）。\n\n同一個位置只能放一個模型：如果兩個中轉站都有 gpt-5.6-sol，需要手動為它們選擇不同的位置。切換回其他供應商後會自動恢復，不會刪除原有設定。",
     "defaultModel": "預設模型",
     "defaultModelPlaceholder": "選擇預設模型…",
-    "defaultModelHint": "此模型會寫入接管的 config.toml，作為 Codex 開啟時的預設模型；執行時仍可切換模型。"
+    "defaultModelHint": "此模型會寫入接管的 config.toml，作為 Codex 開啟時的預設模型；執行時仍可切換模型。",
+    "defaultReasoningEffort": "預設推理強度",
+    "defaultReasoningEffortHint": "此檔位會寫入接管 config.toml 的 `model_reasoning_effort`，作為 Codex 開啟時的預設推理強度；執行時仍可依工作階段切換。"
   }
 }

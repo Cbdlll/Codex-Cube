@@ -1913,6 +1913,8 @@
     "slotHelpBody": "Codex Desktop には gpt-5.6-sol、gpt-5.4 など固定のモデル位置が 7 つあり、その位置にあるモデルしか表示されません。\n\nサードパーティのモデルには自分の位置がないため、位置を指定しないと Desktop では「custom」と表示され、モデル名が正しく出ません。そこで、各モデルに 7 つの位置のいずれかを割り当てると、その位置の名前で表示されます（元のモデルは一時的に置き換わります）。\n\n同じ位置には 1 つのモデルしか入れません。2 つの中継サービスがどちらも gpt-5.6-sol を持つ場合は、それぞれ異なる位置を選んでください。他の Provider に切り替えると自動的に元に戻り、設定が削除されることはありません。",
     "defaultModel": "デフォルトモデル",
     "defaultModelPlaceholder": "デフォルトモデルを選択…",
-    "defaultModelHint": "このモデルは接管 config.toml の `model` に書き込まれ、Codex 起動時のデフォルトモデルになります。実行時にもモデルは切り替えられます。"
+    "defaultModelHint": "このモデルは接管 config.toml の `model` に書き込まれ、Codex 起動時のデフォルトモデルになります。実行時にもモデルは切り替えられます。",
+    "defaultReasoningEffort": "デフォルト推論強度",
+    "defaultReasoningEffortHint": "この値は接管 config.toml の `model_reasoning_effort` に書き込まれ、Codex 起動時のデフォルト推論強度になります。実行時にもセッション単位で変更できます。"
   }
 }

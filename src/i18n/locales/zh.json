@@ -1911,6 +1911,8 @@
     "editTitle": "编辑聚合供应商",
     "defaultModel": "默认模型",
     "defaultModelPlaceholder": "选择默认模型…",
-    "defaultModelHint": "该模型将写入接管的 config.toml，作为 Codex 打开时的默认模型；运行时仍可按模型切换。"
+    "defaultModelHint": "该模型将写入接管的 config.toml，作为 Codex 打开时的默认模型；运行时仍可按模型切换。",
+    "defaultReasoningEffort": "默认推理强度",
+    "defaultReasoningEffortHint": "该档位将写入接管的 config.toml 的 `model_reasoning_effort`，作为 Codex 打开时的默认推理强度；运行时仍可按会话切换。"
   }
 }

@@ -1907,6 +1907,8 @@
     "editTitle": "Edit Aggregate Provider",
     "defaultModel": "Default model",
     "defaultModelPlaceholder": "Select a default model…",
-    "defaultModelHint": "This model is written as `model` in the takeover config.toml and becomes Codex's default model on startup; you can still switch models at runtime."
+    "defaultModelHint": "This model is written as `model` in the takeover config.toml and becomes Codex's default model on startup; you can still switch models at runtime.",
+    "defaultReasoningEffort": "Default reasoning effort",
+    "defaultReasoningEffortHint": "This value is written as `model_reasoning_effort` in the takeover config.toml and becomes Codex's default reasoning effort on startup; you can still change it per session."
   }
 }

@@ -736,8 +736,8 @@ pub fn workflow_skill_metadata(content: &str) -> (Option<String>, Option<String>
 }
 
 /// 生成 Workflow Skill 的 SKILL.md：frontmatter 只含 name/description，
-/// 正文按角色列出已注册 subagent 名称（不写入 model / reasoning，避免过期硬编码）。
-/// 运行时从 agent TOML 解析模型，并由代理层在 generic role 派发时显式注入。
+/// 正文按角色列出已注册 subagent 名称（不写入路径、model、reasoning）。
+/// 派出时 `agent_type` 只用内置角色；Cube 代理从对应 TOML 注入 model / reasoning_effort。
 pub fn workflow_skill_markdown(
     agents: &[SubagentRecord],
     role_agents: &RoleAgents,
@@ -769,11 +769,8 @@ and research subtasks to registered subagents.\n\
         "## Prerequisites\n\
 - Custom subagents require local routing (local proxy takeover for Codex). multi-agent v2 \
 encrypts dispatched messages, so without local routing workers receive empty or unreadable tasks.\n\
-- Registered custom agents live in `~/.codex/agents/*.toml` (personal) or `.codex/agents/*.toml` \
-(project). Each file requires `name`, `description`, and `developer_instructions`; `model`, \
-`model_reasoning_effort`, `sandbox_mode`, `mcp_servers`, and `skills.config` are optional. \
-Codex identifies agents by their `name` field, and a custom name overrides the built-in \
-agents (default, worker, explorer).\n\n",
+- Registered agents live in `~/.codex/agents/*.toml`. Codex Cube reads those files at spawn \
+time. The coordinator does not pass file paths to `spawn_agent`.\n\n",
     );
     output.push_str(
         "## Roles\n\
@@ -813,13 +810,9 @@ of the `worker` / `explorer` / `default` roles, and the same subagent may be lis
 multiple roles.\n",
     );
     output.push_str(
-        "- The runtime registration files in `~/.codex/agents/*.toml` and the current spawn-tool \
-schema are authoritative. This document must not duplicate model names, reasoning levels, or a \
-default worker: those values may change after installation.\n",
-    );
-    output.push_str(
-        "- At dispatch time, resolve the selected agent name, `model`, and `model_reasoning_effort` \
-from the current registration and pass those values explicitly when the tool requires a generic role.\n",
+        "- Spawn `agent_type` as the role, not as the bullet name. Codex Cube binds the first \
+listed agent for that role and injects `model` / `reasoning_effort` from its registration \
+file. This document must not duplicate model names, reasoning levels, or a default worker.\n",
     );
     let mut listed_any_role = false;
     for (role, names) in [
@@ -841,9 +834,8 @@ from the current registration and pass those values explicitly when the tool req
     }
     if !listed_any_role && !worker_agent.trim().is_empty() {
         output.push_str(&format!(
-            "- No role mapping is currently listed. Dispatch using the registered agent \
-`{worker_agent}` after resolving its `model` and `model_reasoning_effort` from \
-`~/.codex/agents/{worker_agent}.toml`.\n"
+            "- No role mapping is currently listed. Spawn `agent_type=\"worker\"`; Codex Cube \
+binds `{worker_agent}`.\n"
         ));
     }
     output.push('\n');
@@ -871,42 +863,25 @@ role list (`worker` → `default` → `explorer`), then to the default worker.\n
     );
     output.push_str(
         "## Spawning protocol\n\
-- Start each multi-round task with a NEW subagent spawned from the registered worker agent \
-(`fork_turns=\"none\"`); never substitute the coordinator's own model.\n\
-- Use the subagent-spawning tool actually exposed by this session: the collaboration tool \
-(`spawn_agent` / `collaboration__spawn_agent`, then `wait_agent`/`followup_task`/`send_message` \
-to continue) when available, or the app thread tools (`create_thread` + \
-`send_message_to_thread` + `wait_threads`) when those are the only subagent tools exposed. \
-Never call a tool that is not in the current tool list.\n\
-- Inspect the current spawn tool schema before dispatching. Spawn with the allowed generic \
-role matching the subagent's registered type (`worker` for worker-typed, `explorer` for \
-explorer-typed, `default` for default-typed) and pass the resolved `model` and \
-`reasoning_effort` explicitly. Current Codex collaboration spawn instantiates those built-in \
-roles; a registered custom name in the schema is not a spawnable `agent_type` and returns \
-\"agent type is currently not available\".\n\
-- Before dispatching, resolve the selected registered agent's current `model` and \
-`model_reasoning_effort` from `~/.codex/agents/<name>.toml`; never copy a model name into this \
-skill or assume a stale global default.\n\
-- Never invent or pass an `agent_type` value absent from the current schema. Do not pass a \
-registered agent file name as `agent_type` even if it appears in the schema enum.\n\
-- Never dispatch a generic role without explicit `model` and `reasoning_effort`; do not rely on \
-`[agents]` defaults or the parent model for routing.\n\
-- Codex Cube's local proxy rewrites `spawn_agent` calls to keep `agent_type` as a built-in \
-role and to inject the `model` and `reasoning_effort` resolved from the registered agent TOML. \
-A custom name emitted by the model is mapped back to the role. That rewrite is the runtime \
-guarantee: spawn must not inherit `[agents].default_subagent_model` or the parent model, and \
-must not send a custom `agent_type` the collaboration runtime cannot instantiate. If the child \
-turn still uses a different model, treat the dispatch as failed.\n\
-- After every dispatch, verify the child session's `turn_context.model` and reasoning effort \
-against the values resolved from the agent TOML before accepting the result; a successful spawn \
-alone does not prove correct routing.\n\
-- Treat mapping a listed custom name back to the generic role as normal dispatch; do not add a \
-user-facing caveat solely because the schema listed that name. Report it only if delegation \
-fails or the fallback changes requested behavior.\n\
-- Use the same registered reasoning_effort on every round and when resuming; never let \
-the worker run at a different effort than registered.\n\
-- Codex handles spawning, follow-up routing, waiting for results, and closing threads; \
-you can also steer, stop, or close a subagent with a direct request.\n\n",
+- Start each multi-round task with a NEW subagent (`fork_turns=\"none\"`); never substitute \
+the coordinator's own model.\n\
+- Use the subagent-spawning tool actually exposed by this session: `spawn_agent` / \
+`collaboration__spawn_agent` (then `wait_agent` / `followup_task` / `send_message`), or the \
+app thread tools (`create_thread` + `send_message_to_thread` + `wait_threads`) when those \
+are the only subagent tools exposed. Never call a tool that is not in the current tool list.\n\
+- Pass only these `spawn_agent` arguments:\n\
+  `agent_type`: `worker` for write/implementation, `explorer` for read-only investigation, \
+`default` otherwise.\n\
+  `fork_turns`: `\"none\"`.\n\
+  `message`: the self-contained task.\n\
+  `task_name`: a short instance id for this child, not an agent selector.\n\
+- Do not pass a registered bullet name, a `.toml` path, or a model id as `agent_type`. That \
+returns \"agent type is currently not available\".\n\
+- Do not pass `model`, `reasoning_effort`, or `model_reasoning_effort`. Codex Cube injects \
+`model` and `reasoning_effort` from the first listed agent's registration for that role. \
+If the child's `turn_context.model` does not match that registration, treat the dispatch \
+as failed.\n\
+- Never invent or pass an `agent_type` value absent from the current schema.\n\n",
     );
 
     output.push_str(
@@ -2022,6 +1997,7 @@ mod tests {
             .contains("dispatch registered workers by default instead of doing the work inline"));
         assert!(markdown.contains("- **worker:**"));
         assert!(markdown.contains("  - `deepseek-flash`"));
+        assert!(!markdown.contains("/tmp/agents/deepseek-flash.toml"));
         assert!(!markdown.contains("model: deepseek-v4-flash"));
         assert!(!markdown.contains("reasoning: xhigh"));
         assert!(markdown.contains("  - `gpt-sol-worker`"));
@@ -2031,6 +2007,7 @@ mod tests {
         assert!(markdown.contains("same subagent may be listed under multiple roles"));
         assert!(!markdown.contains("**Default worker:**"));
         assert!(markdown.contains("must not duplicate model names"));
+        assert!(markdown.contains("Spawn `agent_type` as the role, not as the bullet name"));
         assert!(markdown.contains("## Dispatch flow (execute on activation)"));
         assert!(markdown.contains("1. Decompose the user's request"));
         assert!(markdown.contains("2. Spawn one worker per subtask immediately and in parallel"));
@@ -2041,22 +2018,21 @@ mod tests {
         assert!(markdown.contains("one worker per non-overlapping scope"));
         assert!(markdown.contains("## Prerequisites"));
         assert!(markdown.contains("~/.codex/agents"));
+        assert!(markdown.contains("does not pass file paths"));
         assert!(markdown.contains("local routing"));
         assert!(markdown.contains("## Triggering"));
         assert!(markdown.contains("## Spawning protocol"));
         assert!(markdown.contains("fork_turns=\"none\""));
-        assert!(markdown.contains("Spawn with the allowed generic role matching"));
-        assert!(markdown.contains("`worker` for worker-typed, `explorer` for explorer-typed"));
-        assert!(markdown.contains("pass the resolved `model` and `reasoning_effort` explicitly"));
+        assert!(markdown.contains("Pass only these `spawn_agent` arguments"));
+        assert!(markdown.contains("`agent_type`: `worker` for write/implementation"));
+        assert!(markdown.contains("Do not pass a registered bullet name"));
         assert!(markdown.contains("agent type is currently not available"));
-        assert!(markdown.contains("Do not pass a registered agent file name as `agent_type`"));
-        assert!(markdown.contains("Never dispatch a generic role without explicit"));
-        assert!(markdown.contains("keep `agent_type` as a built-in"));
+        assert!(markdown.contains("Do not pass `model`, `reasoning_effort`, or `model_reasoning_effort`"));
+        assert!(markdown.contains("Codex Cube injects"));
         assert!(markdown.contains("turn_context.model"));
         assert!(markdown.contains("`worker` role list (first listed agent wins)"));
         assert!(markdown
             .contains("Never invent or pass an `agent_type` value absent from the current schema"));
-        assert!(markdown.contains("do not add a user-facing caveat"));
         assert!(markdown.contains("max_concurrent_threads_per_session"));
         assert!(markdown.contains("## Worker lifecycle"));
         assert!(markdown.contains("followup_task"));
@@ -2083,7 +2059,7 @@ mod tests {
         );
 
         assert!(markdown.contains(
-            "Dispatch using the registered agent `empty-worker` after resolving its `model`"
+            "No role mapping is currently listed. Spawn `agent_type=\"worker\"`; Codex Cube binds `empty-worker`."
         ));
         // 空角色映射不列出任何角色分组的 agent。
         assert!(!markdown.contains("- **worker:**"));

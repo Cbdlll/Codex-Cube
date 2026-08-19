@@ -203,10 +203,12 @@ describe("aggregateProvider", () => {
     expect(settings.memberProviderIds).toEqual(["deepseek"]);
     expect(settings.aggregateModels).toEqual(models);
     expect(settings.defaultModel).toBe("deepseek-chat");
+    expect(settings.defaultReasoningEffort).toBe("high");
     expect(settings.modelCatalog).toEqual(buildAggregateModelCatalog(models));
     expect(settings.config).toContain('model_provider = "custom"');
     expect(settings.config).toContain("[model_providers.custom]");
     expect(settings.config).toContain('model = "deepseek-chat"');
+    expect(settings.config).toContain('model_reasoning_effort = "high"');
     expect(
       (settings.modelCatalog as { models: unknown[] }).models[0],
     ).toMatchObject({
@@ -235,10 +237,44 @@ describe("aggregateProvider", () => {
     expect(
       buildAggregateConfigTomlPreview("agg", models, "kimi-k2"),
     ).toContain('model = "kimi-k2"');
+    expect(
+      buildAggregateConfigTomlPreview("agg", models, "kimi-k2"),
+    ).toContain('model_reasoning_effort = "high"');
     // 未传显式默认模型时回退到首项。
     expect(buildAggregateConfigTomlPreview("agg", models)).toContain(
       'model = "deepseek-chat"',
     );
+  });
+
+  it("honors an explicit default reasoning effort in settings and preview", () => {
+    const models = [
+      {
+        model: "deepseek-chat",
+        providerId: "deepseek",
+        displayName: "DeepSeek Chat",
+      },
+    ];
+    const settings = buildAggregateSettingsConfig(
+      models,
+      ["deepseek"],
+      "deepseek-chat",
+      "max",
+    );
+    expect(settings.defaultReasoningEffort).toBe("max");
+    expect(settings.config).toContain('model_reasoning_effort = "max"');
+    expect(
+      buildAggregateConfigTomlPreview(
+        "agg",
+        models,
+        "deepseek-chat",
+        undefined,
+        "xhigh",
+      ),
+    ).toContain('model_reasoning_effort = "xhigh"');
+    expect(
+      buildAggregateSettingsConfig(models, ["deepseek"], "", "not-a-level")
+        .defaultReasoningEffort,
+    ).toBe("high");
   });
 
   it("parses stored settings for edit mode (camelCase + snake_case)", () => {
@@ -257,10 +293,32 @@ describe("aggregateProvider", () => {
     });
     expect(parsed.memberProviderIds).toEqual(["deepseek", "kimi"]);
     expect(parsed.defaultModel).toBe("kimi-k2");
+    expect(parsed.defaultReasoningEffort).toBe("high");
     expect(parsed.models).toHaveLength(2);
     expect(parsed.models[0].upstreamModel).toBe("deepseek-chat");
     expect(parsed.models[0].apiFormat).toBe("openai_chat");
     expect(parsed.models[1].providerId).toBe("kimi");
+  });
+
+  it("parses default reasoning effort from settings key or config.toml", () => {
+    expect(
+      parseAggregateSettings({
+        defaultReasoningEffort: "ultra",
+        aggregateModels: [{ model: "kimi-k3", providerId: "kimi" }],
+      }).defaultReasoningEffort,
+    ).toBe("ultra");
+    expect(
+      parseAggregateSettings({
+        default_reasoning_effort: "low",
+        aggregateModels: [{ model: "kimi-k3", providerId: "kimi" }],
+      }).defaultReasoningEffort,
+    ).toBe("low");
+    expect(
+      parseAggregateSettings({
+        config: 'model = "kimi-k3"\nmodel_reasoning_effort = "max"\n',
+        aggregateModels: [{ model: "kimi-k3", providerId: "kimi" }],
+      }).defaultReasoningEffort,
+    ).toBe("max");
   });
 
   it("generates stable aggregate provider ids", () => {
