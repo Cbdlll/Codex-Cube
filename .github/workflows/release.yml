@@ -55,20 +55,11 @@ jobs:
           tagName: __VERSION__
           releaseName: __VERSION__
           releaseBody: |
-            1.0.1
+            1.0.2
 
-            - Honor the selected Codex thread model after a Desktop fork when the first request still carries the parent model
-            - Restore aggregate model context windows from member catalogs and Cube presets instead of the 128k fallback
-            - Keep the aggregate default model and reasoning effort after save, instead of restoring stale Codex live config
-            - Collapse duplicate `model` / `model_reasoning_effort` keys so Codex can parse takeover config.toml
-            - Let aggregate providers set a default reasoning effort in takeover config.toml, matching ordinary providers
-            - Spawn cube-dispatch workers with built-in roles so Cube injects the registered model and reasoning effort
-            - Fix cube-dispatch spawn routing so registered workers use their bound provider and model
-            - Refresh stale thread models after provider URL or API key changes
-            - Remove unused MCP, Skills marketplace, WebDAV, and related UI copied from CC Switch
-            - Keep Codex `[mcp_servers]` in live `config.toml` when switching providers
-            - Remove in-app update checks; download new app versions from GitHub Releases
-            - Tighten the About page local Codex CLI layout for a single tool
+            - Fill OpenCode Go and aggregate context windows from Cube provider presets when `/v1/models` omits them, matching ordinary existing-config providers
+            - Keep a hand-edited context window when fetching or saving aggregate and catalog models
+            - Read `context_length` / `max_model_len` / `max_input_tokens` aliases from `/v1/models`
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

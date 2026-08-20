@@ -546,6 +546,26 @@ model_reasoning_effort = "high"
     expect(knownCodexContextWindow("kimi-k3")).toBe(1048576);
     expect(knownCodexContextWindow("kimi-k3@kimi")).toBe(1048576);
     expect(knownCodexContextWindow("kimi-k2")).toBeUndefined();
+    expect(knownCodexContextWindow("glm-5.2")).toBe(204800);
+    expect(knownCodexContextWindow("glm-5.2@opencode")).toBe(204800);
+    expect(knownCodexContextWindow("openai/gpt-5.6-sol")).toBe(272000);
+  });
+
+  it("fills missing context windows from presets on save without clobbering edits", () => {
+    const normalized = normalizeAggregateModelsForSave([
+      {
+        model: "glm-5.2",
+        providerId: "opencode",
+        upstreamModel: "glm-5.2",
+      },
+      {
+        model: "deepseek-v4-flash",
+        providerId: "opencode",
+        contextWindow: 999,
+      },
+    ]);
+    expect(normalized[0].contextWindow).toBe(204800);
+    expect(normalized[1].contextWindow).toBe(999);
   });
 
   it("detects aggregate providers by meta.providerType", () => {

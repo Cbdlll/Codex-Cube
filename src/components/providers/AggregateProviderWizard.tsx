@@ -73,6 +73,7 @@ import {
   setCodexReasoningEffortInConfig,
   type CodexReasoningEffort,
 } from "@/utils/aggregateProvider";
+import { resolveCodexContextWindow } from "@/utils/codexPresetContextWindows";
 
 const AGGREGATE_FORM_ID = "aggregate-provider-form";
 
@@ -97,6 +98,40 @@ const STEPS = [
 ] as const;
 
 type FetchState = "idle" | "loading" | "done" | "error";
+
+function memberCatalogModels(provider: Provider | undefined): Record<string, any>[] {
+  const config = provider?.settingsConfig as Record<string, any> | undefined;
+  return Array.isArray(config?.modelCatalog?.models)
+    ? (config.modelCatalog.models as Record<string, any>[])
+    : [];
+}
+
+function hasDeclaredContextWindow(meta: AggregateModelMeta | undefined): boolean {
+  if (meta?.contextWindow === undefined || meta.contextWindow === "") {
+    return false;
+  }
+  const value = Number(meta.contextWindow);
+  return Number.isFinite(value) && value > 0;
+}
+
+function resolveMemberModelContextWindow(
+  provider: Provider | undefined,
+  model: string,
+  fetchedWindow?: number | null,
+): number | undefined {
+  const catalogMeta = aggregateMetaFromCatalogEntry(
+    memberCatalogModels(provider).find((entry) => entry?.model === model),
+  );
+  const fromCatalogOrPreset = resolveCodexContextWindow(
+    model,
+    catalogMeta?.contextWindow,
+  );
+  if (fromCatalogOrPreset) return fromCatalogOrPreset;
+  if (typeof fetchedWindow === "number" && fetchedWindow > 0) {
+    return fetchedWindow;
+  }
+  return undefined;
+}
 
 interface AggregateProviderWizardProps {
   appId: AppId;
@@ -462,22 +497,25 @@ export function AggregateProviderWizard({
           ...s,
           [providerId]: ids.length > 0 ? "done" : "error",
         }));
-        const meta: Record<string, AggregateModelMeta> = {};
-        for (const m of list) {
-          if (
-            m.id &&
-            typeof m.contextWindow === "number" &&
-            m.contextWindow > 0
-          ) {
-            meta[m.id] = { contextWindow: m.contextWindow };
+        setModelMeta((current) => {
+          const previous = current[providerId] ?? {};
+          const next = { ...previous };
+          let changed = false;
+          for (const m of list) {
+            if (!m.id) continue;
+            if (hasDeclaredContextWindow(next[m.id])) continue;
+            const window = resolveMemberModelContextWindow(
+              provider,
+              m.id,
+              m.contextWindow,
+            );
+            if (window === undefined) continue;
+            next[m.id] = { ...next[m.id], contextWindow: window };
+            changed = true;
           }
-        }
-        if (Object.keys(meta).length > 0) {
-          setModelMeta((current) => ({
-            ...current,
-            [providerId]: { ...(current[providerId] ?? {}), ...meta },
-          }));
-        }
+          if (!changed) return current;
+          return { ...current, [providerId]: next };
+        });
       } catch (err) {
         console.warn(
           `[Aggregate] Failed to fetch models for ${providerId}:`,
@@ -563,8 +601,27 @@ export function AggregateProviderWizard({
         }
         return { ...current, [providerId]: next };
       });
+      if (!enabled) return;
+      const provider = providers.find((item) => item.id === providerId);
+      const window = resolveMemberModelContextWindow(provider, model);
+      if (window === undefined) return;
+      setModelMeta((current) => {
+        if (hasDeclaredContextWindow(current[providerId]?.[model])) {
+          return current;
+        }
+        return {
+          ...current,
+          [providerId]: {
+            ...(current[providerId] ?? {}),
+            [model]: {
+              ...(current[providerId]?.[model] ?? {}),
+              contextWindow: window,
+            },
+          },
+        };
+      });
     },
-    [],
+    [providers],
   );
 
   const toggleAllForProvider = useCallback(
@@ -574,8 +631,24 @@ export function AggregateProviderWizard({
         ...current,
         [providerId]: enabled ? new Set(models) : new Set(),
       }));
+      if (!enabled || models.length === 0) return;
+      const provider = providers.find((item) => item.id === providerId);
+      setModelMeta((current) => {
+        const previous = current[providerId] ?? {};
+        const next = { ...previous };
+        let changed = false;
+        for (const model of models) {
+          if (hasDeclaredContextWindow(next[model])) continue;
+          const window = resolveMemberModelContextWindow(provider, model);
+          if (window === undefined) continue;
+          next[model] = { ...next[model], contextWindow: window };
+          changed = true;
+        }
+        if (!changed) return current;
+        return { ...current, [providerId]: next };
+      });
     },
-    [availableModelsFor],
+    [availableModelsFor, providers],
   );
 
   const addManualModel = useCallback(
@@ -594,8 +667,26 @@ export function AggregateProviderWizard({
         return { ...current, [providerId]: next };
       });
       setManualInputs((current) => ({ ...current, [providerId]: "" }));
+      const provider = providers.find((item) => item.id === providerId);
+      const window = resolveMemberModelContextWindow(provider, value);
+      if (window === undefined) return;
+      setModelMeta((current) => {
+        if (hasDeclaredContextWindow(current[providerId]?.[value])) {
+          return current;
+        }
+        return {
+          ...current,
+          [providerId]: {
+            ...(current[providerId] ?? {}),
+            [value]: {
+              ...(current[providerId]?.[value] ?? {}),
+              contextWindow: window,
+            },
+          },
+        };
+      });
     },
-    [manualInputs],
+    [manualInputs, providers],
   );
 
   const removeManualModel = useCallback((providerId: string, model: string) => {
@@ -609,6 +700,33 @@ export function AggregateProviderWizard({
       return { ...current, [providerId]: next };
     });
   }, []);
+
+  // 编辑回填 / 成员目录异步就绪后，给已选且仍缺窗口的模型补上预设上下文。
+  // 已有用户填写或已保存的值不覆盖。
+  useEffect(() => {
+    if (providers.length === 0) return;
+    setModelMeta((current) => {
+      let changed = false;
+      const next: Record<string, Record<string, AggregateModelMeta>> = {
+        ...current,
+      };
+      for (const providerId of memberIds) {
+        const selected = selectedModels[providerId];
+        if (!selected || selected.size === 0) continue;
+        const provider = providers.find((item) => item.id === providerId);
+        const bucket = { ...(next[providerId] ?? {}) };
+        for (const model of selected) {
+          if (hasDeclaredContextWindow(bucket[model])) continue;
+          const window = resolveMemberModelContextWindow(provider, model);
+          if (window === undefined) continue;
+          bucket[model] = { ...bucket[model], contextWindow: window };
+          changed = true;
+        }
+        next[providerId] = bucket;
+      }
+      return changed ? next : current;
+    });
+  }, [providers, memberIds, selectedModels]);
 
   // 按当前选择生成模型映射（用于步骤 3 预览/步骤 4 保存），保留真实模型 ID。
   const preview = useMemo<{ models: AggregateProviderModel[] }>(() => {

@@ -31,6 +31,21 @@ struct ModelEntry {
     owned_by: Option<String>,
     #[serde(default)]
     context_window: Option<i64>,
+    #[serde(default)]
+    context_length: Option<i64>,
+    #[serde(default)]
+    max_model_len: Option<i64>,
+    #[serde(default)]
+    max_input_tokens: Option<i64>,
+}
+
+impl ModelEntry {
+    fn resolved_context_window(&self) -> Option<i64> {
+        [self.context_window, self.context_length, self.max_model_len, self.max_input_tokens]
+            .into_iter()
+            .flatten()
+            .find(|value| *value > 0)
+    }
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
@@ -104,10 +119,13 @@ pub async fn fetch_models(
                 .data
                 .unwrap_or_default()
                 .into_iter()
-                .map(|m| FetchedModel {
-                    id: m.id,
-                    owned_by: m.owned_by,
-                    context_window: m.context_window,
+                .map(|m| {
+                    let context_window = m.resolved_context_window();
+                    FetchedModel {
+                        id: m.id,
+                        owned_by: m.owned_by,
+                        context_window,
+                    }
                 })
                 .collect();
 
@@ -318,6 +336,16 @@ mod tests {
     #[test]
     fn test_candidates_empty() {
         assert!(build_models_url_candidates("", false, None).is_err());
+    }
+
+    #[test]
+    fn model_entry_reads_context_length_alias() {
+        let entry: ModelEntry =
+            serde_json::from_str(r#"{"id":"glm-5.2","context_length":204800}"#).unwrap();
+        assert_eq!(entry.resolved_context_window(), Some(204800));
+        let max_len: ModelEntry =
+            serde_json::from_str(r#"{"id":"kimi-k3","max_model_len":1048576}"#).unwrap();
+        assert_eq!(max_len.resolved_context_window(), Some(1_048_576));
     }
 
     #[test]

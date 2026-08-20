@@ -309,9 +309,7 @@ fn parse_codex_toml_document(text: &str) -> Result<DocumentMut, AppError> {
         Ok(doc) => Ok(doc),
         Err(original) => collapse_duplicate_top_level_toml_key(text, "model_reasoning_effort")
             .parse::<DocumentMut>()
-            .map_err(|_| {
-                AppError::Message(format!("Invalid Codex config.toml: {original}"))
-            }),
+            .map_err(|_| AppError::Message(format!("Invalid Codex config.toml: {original}"))),
     }
 }
 
@@ -884,21 +882,52 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
 ///
 /// GPT slots use the official Codex bundled windows (`codex debug models
 /// --bundled`, Codex CLI 0.147). Third-party ids match Cube's built-in
-/// presets so aggregate catalogs do not regress to the conservative 128k
-/// default (Desktop then shows ~122k via `effective_context_window_percent`
+/// presets so aggregate / OpenCode catalogs do not regress to the conservative
+/// 128k default (Desktop then shows ~122k via `effective_context_window_percent`
 /// 95). Explicit per-model `contextWindow` and a top-level
 /// `model_context_window` in config.toml both take precedence. Collision
-/// slugs `model@provider` look up the bare model id.
-fn codex_known_context_window(model: &str) -> Option<u64> {
+/// slugs `model@provider` and aggregator prefixes `vendor/model` look up the
+/// bare model id. Duplicate preset values keep the larger window.
+pub(crate) fn codex_known_context_window(model: &str) -> Option<u64> {
     let model = model.split('@').next().unwrap_or(model).trim();
+    if model.is_empty() {
+        return None;
+    }
+    lookup_codex_known_context_window(model).or_else(|| {
+        let basename = model
+            .rsplit(['/', ':'])
+            .next()
+            .map(str::trim)
+            .filter(|item| !item.is_empty() && *item != model)?;
+        lookup_codex_known_context_window(basename)
+    })
+}
+
+fn lookup_codex_known_context_window(model: &str) -> Option<u64> {
     match model {
         "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5" | "gpt-5.4"
-        | "gpt-5.4-mini" | "gpt-5.2" => Some(272_000),
+        | "gpt-5.4-mini" | "gpt-5.2" | "openai/gpt-5.6-sol" => Some(272_000),
         "kimi-k3" => Some(1_048_576),
-        "kimi-k2.7-code" | "kimi-for-coding" => Some(262_144),
-        "deepseek-v4-flash" | "deepseek-v4-pro" => Some(1_048_576),
+        "kimi-k2.7-code" | "kimi-for-coding" | "moonshotai/kimi-k2.5" | "kimi-k2.5" => {
+            Some(262_144)
+        }
+        "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek/deepseek-v4-flash-0731" => {
+            Some(1_048_576)
+        }
         "grok-4.5" | "grok-4.6" => Some(500_000),
         "mimo-v2.5" | "mimo-v2.5-pro" => Some(1_048_576),
+        "glm-5.2" | "glm-5.1" => Some(204_800),
+        "ZhipuAI/GLM-5.1" | "zai-org/glm-5.1" => Some(202_800),
+        "MiniMax-M3" | "claude-fable-5" => Some(1_000_000),
+        "MiniMaxAI/MiniMax-M2.7" | "Pro/MiniMaxAI/MiniMax-M2.7" | "MiniMax-M2.7" => Some(200_000),
+        "qwen3-coder-plus" | "LongCat-2.0" => Some(1_048_576),
+        "hy3" | "hy3-preview" | "ark-code-latest" => Some(256_000),
+        "Ling-2.6-1T"
+        | "doubao-seed-2-1-pro-260628"
+        | "step-3.5-flash"
+        | "step-3.5-flash-2603"
+        | "step-3.7-flash" => Some(262_144),
+        "qianfan-code-latest" => Some(131_072),
         _ => None,
     }
 }
@@ -3027,10 +3056,7 @@ pub fn merge_codex_live_user_settings_into_aggregate(
         .or_else(|| settings_default_reasoning_effort(provider_settings))
         .unwrap_or("high");
     merged["model_reasoning_effort"] = toml_edit::value(effort);
-    result_obj.insert(
-        "defaultReasoningEffort".to_string(),
-        json!(effort),
-    );
+    result_obj.insert("defaultReasoningEffort".to_string(), json!(effort));
 
     result_obj.insert("config".to_string(), json!(merged.to_string()));
     result
@@ -4872,6 +4898,37 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
+    fn codex_catalog_inherits_preset_context_window_for_opencode_models() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "glm-5.2", "displayName": "GLM 5.2" },
+                    { "model": "glm-5.2@opencode", "displayName": "GLM 5.2" },
+                    { "model": "openai/gpt-5.6-sol", "displayName": "GPT-5.6" }
+                ]
+            }
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("catalog generation should not error")
+        .expect("non-empty modelCatalog must yield a catalog");
+        let models = catalog["models"].as_array().expect("models array");
+        let window = |slug: &str| {
+            models
+                .iter()
+                .find(|entry| entry["slug"] == slug)
+                .and_then(|entry| entry.get("context_window"))
+                .and_then(Value::as_u64)
+        };
+        assert_eq!(window("glm-5.2"), Some(204_800));
+        assert_eq!(window("glm-5.2@opencode"), Some(204_800));
+        assert_eq!(window("openai/gpt-5.6-sol"), Some(272_000));
+    }
+
+    #[test]
     fn codex_catalog_top_level_model_context_window_overrides_official_default() {
         let settings = json!({
             "modelCatalog": {
@@ -6642,7 +6699,10 @@ base_url = "http://127.0.0.1:9999/v1"
         });
 
         let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
-        let cfg = merged.get("config").and_then(Value::as_str).expect("config");
+        let cfg = merged
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config");
         assert_eq!(
             merged.get("defaultReasoningEffort").and_then(Value::as_str),
             Some("low")
@@ -6672,7 +6732,10 @@ base_url = "http://127.0.0.1:9999/v1"
             "proxy base_url must not be stored on the aggregate provider"
         );
         assert!(
-            merged.get("auth").and_then(Value::as_object).is_some_and(|auth| auth.is_empty()),
+            merged
+                .get("auth")
+                .and_then(Value::as_object)
+                .is_some_and(|auth| auth.is_empty()),
             "aggregate auth must stay empty"
         );
         assert_eq!(
@@ -6702,7 +6765,10 @@ base_url = "http://127.0.0.1:9999/v1"
         });
 
         let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
-        let cfg = merged.get("config").and_then(Value::as_str).expect("config");
+        let cfg = merged
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config");
         assert_eq!(
             cfg.matches("model_reasoning_effort =").count(),
             1,

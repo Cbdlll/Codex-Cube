@@ -46,6 +46,7 @@ import type {
   ProviderCategory,
 } from "@/types";
 import type { AppId } from "@/lib/api";
+import { resolveCodexContextWindow } from "@/utils/codexPresetContextWindows";
 
 interface EndpointCandidate {
   url: string;
@@ -119,11 +120,16 @@ interface CodexFormFieldsProps {
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
 
 function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
+  const model = seed?.model ?? "";
+  const resolvedWindow =
+    seed?.contextWindow !== undefined && seed?.contextWindow !== ""
+      ? seed.contextWindow
+      : (resolveCodexContextWindow(model) ?? "");
   return {
     rowId: crypto.randomUUID(),
-    model: seed?.model ?? "",
+    model,
     displayName: seed?.displayName ?? "",
-    contextWindow: seed?.contextWindow ?? "",
+    contextWindow: resolvedWindow,
     // Carry native-profile overrides verbatim (not user-editable in the row UI,
     // but must survive load->save so the official catalog fidelity is kept).
     ...(seed?.supportsParallelToolCalls !== undefined
@@ -134,6 +140,16 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
       ? { baseInstructions: seed.baseInstructions }
       : {}),
   };
+}
+
+function fillCatalogContextWindow(
+  row: CodexCatalogRow,
+  modelId: string,
+  fetchedWindow?: number | null,
+): CodexCatalogRow {
+  if (String(row.contextWindow ?? "").trim()) return row;
+  const window = resolveCodexContextWindow(modelId, fetchedWindow);
+  return window ? { ...row, contextWindow: String(window) } : row;
 }
 
 // Compares rows (with rowId) to incoming models (without) by data fields only,
@@ -345,6 +361,14 @@ export function CodexFormFields({
         .then((models) => {
           if (seq !== fetchModelsSeqRef.current) return;
           setFetchedModels(models);
+          setCatalogRows((current) =>
+            current.map((row) => {
+              const id = row.model.trim();
+              if (!id) return row;
+              const fetched = models.find((model) => model.id === id);
+              return fillCatalogContextWindow(row, id, fetched?.contextWindow);
+            }),
+          );
           if (models.length === 0) {
             toast.info(t("providerForm.fetchModelsEmpty"));
           } else {
@@ -381,6 +405,14 @@ export function CodexFormFields({
       .then((models) => {
         if (seq !== fetchModelsSeqRef.current) return;
         setFetchedModels(models);
+        setCatalogRows((current) =>
+          current.map((row) => {
+            const id = row.model.trim();
+            if (!id) return row;
+            const fetched = models.find((model) => model.id === id);
+            return fillCatalogContextWindow(row, id, fetched?.contextWindow);
+          }),
+        );
         if (models.length === 0) {
           toast.info(t("providerForm.fetchModelsEmpty"));
         } else {
@@ -435,8 +467,9 @@ export function CodexFormFields({
             model: id,
             displayName: row.displayName?.trim() ? row.displayName : id,
           };
-          if (fetched?.contextWindow) {
-            patch.contextWindow = String(fetched.contextWindow);
+          const window = resolveCodexContextWindow(id, fetched?.contextWindow);
+          if (window) {
+            patch.contextWindow = String(window);
           }
           return { ...row, ...patch };
         }),
@@ -482,6 +515,7 @@ export function CodexFormFields({
       createCatalogRow({
         model: trimmedDefaultModel,
         displayName: trimmedDefaultModel,
+        contextWindow: resolveCodexContextWindow(trimmedDefaultModel),
       }),
     ]);
   }, [onCatalogModelsChange, trimmedDefaultModel]);

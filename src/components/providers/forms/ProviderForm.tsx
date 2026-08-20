@@ -35,6 +35,7 @@ import {
 } from "@/utils/providerConfigUtils";
 import { isNonNegativeDecimalString } from "@/types/usage";
 import { getCodexCustomTemplate } from "@/config/codexTemplates";
+import { resolveCodexContextWindow } from "@/utils/codexPresetContextWindows";
 import CodexConfigEditor from "./CodexConfigEditor";
 import { ProviderPresetSelector } from "./ProviderPresetSelector";
 import { BasicFormFields } from "./BasicFormFields";
@@ -85,9 +86,13 @@ export const normalizeCodexCatalogModelsForSave = (
       /[^\d]/g,
       "",
     );
-    const contextWindow = rawContextWindow
+    const parsedContextWindow = rawContextWindow
       ? Number.parseInt(rawContextWindow, 10)
       : undefined;
+    const contextWindow =
+      parsedContextWindow && parsedContextWindow > 0
+        ? parsedContextWindow
+        : resolveCodexContextWindow(model);
 
     const inputModalities = item.inputModalities?.filter(
       (m) => typeof m === "string" && m.trim(),
