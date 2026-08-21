@@ -10,12 +10,39 @@ const EXTRA_KNOWN_CONTEXT_WINDOWS: Record<string, number> = {
   "gpt-5.6-sol": OFFICIAL_GPT_CONTEXT_WINDOW,
   "gpt-5.6-terra": OFFICIAL_GPT_CONTEXT_WINDOW,
   "gpt-5.6-luna": OFFICIAL_GPT_CONTEXT_WINDOW,
+  "gpt-5.6": OFFICIAL_GPT_CONTEXT_WINDOW,
   "gpt-5.5": OFFICIAL_GPT_CONTEXT_WINDOW,
   "gpt-5.4": OFFICIAL_GPT_CONTEXT_WINDOW,
   "gpt-5.4-mini": OFFICIAL_GPT_CONTEXT_WINDOW,
+  "gpt-5.3-codex-spark": OFFICIAL_GPT_CONTEXT_WINDOW,
   "gpt-5.2": OFFICIAL_GPT_CONTEXT_WINDOW,
   "openai/gpt-5.6-sol": OFFICIAL_GPT_CONTEXT_WINDOW,
+  "grok-4.5": 500_000,
   "grok-4.6": 500_000,
+  // MiniMax official API table (platform.minimax.io): M3 1M, M2.x 204800.
+  "MiniMax-M3": 1_000_000,
+  "minimax-m3": 1_000_000,
+  "MiniMax-M2.7": 204_800,
+  "MiniMax-M2.7-highspeed": 204_800,
+  "minimax-m2.7": 204_800,
+  "MiniMax-M2.5": 204_800,
+  "MiniMax-M2.5-highspeed": 204_800,
+  "minimax-m2.5": 204_800,
+  "MiniMax-M2.1": 204_800,
+  "MiniMax-M2.1-highspeed": 204_800,
+  "MiniMax-M2": 204_800,
+  // Z.ai GLM-5.3 docs: 1M-token context. GLM-5 / 5.1 stay on the 200k-class window.
+  "glm-5.3": 1_048_576,
+  "GLM-5.3": 1_048_576,
+  "glm-5": 204_800,
+  "kimi-k2.6": 262_144,
+  "qwen3.8-max": 1_000_000,
+  "qwen3.7-max": 1_000_000,
+  "qwen3.7-plus": 1_000_000,
+  "qwen3.6-plus": 1_000_000,
+  "qwen3.5-plus": 1_000_000,
+  "mimo-v2-pro": 1_048_576,
+  "mimo-v2-omni": 262_144,
 };
 
 function addContextWindow(
@@ -23,7 +50,7 @@ function addContextWindow(
   model: string,
   window: number,
 ) {
-  const key = model.trim();
+  const key = model.trim().toLowerCase();
   if (!key || !(window > 0)) return;
   const previous = map.get(key);
   if (previous === undefined || window > previous) {
@@ -31,7 +58,11 @@ function addContextWindow(
   }
 }
 
-function indexModelAliases(map: Map<string, number>, model: string, window: number) {
+function indexModelAliases(
+  map: Map<string, number>,
+  model: string,
+  window: number,
+) {
   addContextWindow(map, model, window);
   const bare = model.trim().split("@")[0]?.trim() ?? "";
   if (bare) addContextWindow(map, bare, window);
@@ -62,12 +93,23 @@ function buildPresetContextWindowMap(): Map<string, number> {
 
 const PRESET_CONTEXT_WINDOWS = buildPresetContextWindowMap();
 
+function stripModelTag(model: string): string {
+  return model.replace(/\[[^\]]*\]\s*$/, "").trim() || model;
+}
+
 function lookupKeys(model: string): string[] {
   const id = model.trim();
   if (!id) return [];
   const bare = id.split("@")[0]?.trim() || id;
-  const slash = bare.split("/").pop()?.trim() || bare;
-  return Array.from(new Set([id, bare, slash].filter(Boolean)));
+  const untagged = stripModelTag(bare);
+  const slash = untagged.split("/").pop()?.trim() || untagged;
+  return Array.from(
+    new Set(
+      [id, bare, untagged, slash]
+        .filter(Boolean)
+        .map((key) => key.toLowerCase()),
+    ),
+  );
 }
 
 /**
@@ -89,7 +131,11 @@ export function resolveCodexContextWindow(
   model: string,
   declared?: number | string | null,
 ): number | undefined {
-  if (typeof declared === "number" && Number.isFinite(declared) && declared > 0) {
+  if (
+    typeof declared === "number" &&
+    Number.isFinite(declared) &&
+    declared > 0
+  ) {
     return declared;
   }
   if (typeof declared === "string") {

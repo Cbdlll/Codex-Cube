@@ -58,6 +58,7 @@ jobs:
             1.0.2
 
             - Fill OpenCode Go and aggregate context windows from Cube provider presets when `/v1/models` omits them, matching ordinary existing-config providers
+            - Built-in context windows for OpenCode Go `/v1/models` ids including MiniMax M3/M2.x, GLM-5.3, Qwen 3.x, and Kimi K2.6
             - Keep a hand-edited context window when fetching or saving aggregate and catalog models
             - Read `context_length` / `max_model_len` / `max_input_tokens` aliases from `/v1/models`
           releaseDraft: false

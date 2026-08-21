@@ -294,15 +294,19 @@ wire_api = "responses"
         displayName: "Kimi K2",
       },
     ];
-    const settings = buildAggregateSettingsConfig(models, ["deepseek", "kimi"], "kimi-k2");
+    const settings = buildAggregateSettingsConfig(
+      models,
+      ["deepseek", "kimi"],
+      "kimi-k2",
+    );
     expect(settings.defaultModel).toBe("kimi-k2");
     expect(settings.config).toContain('model = "kimi-k2"');
-    expect(
-      buildAggregateConfigTomlPreview("agg", models, "kimi-k2"),
-    ).toContain('model = "kimi-k2"');
-    expect(
-      buildAggregateConfigTomlPreview("agg", models, "kimi-k2"),
-    ).toContain('model_reasoning_effort = "high"');
+    expect(buildAggregateConfigTomlPreview("agg", models, "kimi-k2")).toContain(
+      'model = "kimi-k2"',
+    );
+    expect(buildAggregateConfigTomlPreview("agg", models, "kimi-k2")).toContain(
+      'model_reasoning_effort = "high"',
+    );
     // 未传显式默认模型时回退到首项。
     expect(buildAggregateConfigTomlPreview("agg", models)).toContain(
       'model = "deepseek-chat"',
@@ -408,9 +412,9 @@ default_subagent_reasoning_effort = "max"
       "high",
       { config: input },
     );
-    expect(String(saved.config).match(/^\s*model_reasoning_effort\s*=/gm)).toHaveLength(
-      1,
-    );
+    expect(
+      String(saved.config).match(/^\s*model_reasoning_effort\s*=/gm),
+    ).toHaveLength(1);
     expect(extractCodexReasoningEffortFromConfig(String(saved.config))).toBe(
       "high",
     );
@@ -549,6 +553,9 @@ model_reasoning_effort = "high"
     expect(knownCodexContextWindow("glm-5.2")).toBe(204800);
     expect(knownCodexContextWindow("glm-5.2@opencode")).toBe(204800);
     expect(knownCodexContextWindow("openai/gpt-5.6-sol")).toBe(272000);
+    expect(knownCodexContextWindow("glm-5.3")).toBe(1048576);
+    expect(knownCodexContextWindow("minimax-m3")).toBe(1000000);
+    expect(knownCodexContextWindow("MiniMax-M2.7")).toBe(204800);
   });
 
   it("fills missing context windows from presets on save without clobbering edits", () => {

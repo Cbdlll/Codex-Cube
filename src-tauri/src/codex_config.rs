@@ -890,39 +890,62 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
 /// bare model id. Duplicate preset values keep the larger window.
 pub(crate) fn codex_known_context_window(model: &str) -> Option<u64> {
     let model = model.split('@').next().unwrap_or(model).trim();
+    let model = model.split('[').next().unwrap_or(model).trim();
     if model.is_empty() {
         return None;
     }
-    lookup_codex_known_context_window(model).or_else(|| {
-        let basename = model
+    let lowered = model.to_ascii_lowercase();
+    lookup_codex_known_context_window(&lowered).or_else(|| {
+        let basename = lowered
             .rsplit(['/', ':'])
             .next()
             .map(str::trim)
-            .filter(|item| !item.is_empty() && *item != model)?;
+            .filter(|item| !item.is_empty() && *item != lowered.as_str())?;
         lookup_codex_known_context_window(basename)
     })
 }
 
 fn lookup_codex_known_context_window(model: &str) -> Option<u64> {
     match model {
-        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5" | "gpt-5.4"
-        | "gpt-5.4-mini" | "gpt-5.2" | "openai/gpt-5.6-sol" => Some(272_000),
+        "gpt-5.6-sol"
+        | "gpt-5.6-terra"
+        | "gpt-5.6-luna"
+        | "gpt-5.6"
+        | "gpt-5.5"
+        | "gpt-5.4"
+        | "gpt-5.4-mini"
+        | "gpt-5.3-codex-spark"
+        | "gpt-5.2"
+        | "openai/gpt-5.6-sol" => Some(272_000),
         "kimi-k3" => Some(1_048_576),
-        "kimi-k2.7-code" | "kimi-for-coding" | "moonshotai/kimi-k2.5" | "kimi-k2.5" => {
-            Some(262_144)
-        }
-        "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek/deepseek-v4-flash-0731" => {
-            Some(1_048_576)
-        }
+        "kimi-k2.7-code"
+        | "kimi-for-coding"
+        | "moonshotai/kimi-k2.5"
+        | "kimi-k2.5"
+        | "kimi-k2.6" => Some(262_144),
+        "deepseek-v4-flash"
+        | "deepseek-v4-pro"
+        | "deepseek/deepseek-v4-flash-0731"
+        | "deepseek-v4-flash-0731" => Some(1_048_576),
         "grok-4.5" | "grok-4.6" => Some(500_000),
-        "mimo-v2.5" | "mimo-v2.5-pro" => Some(1_048_576),
-        "glm-5.2" | "glm-5.1" => Some(204_800),
-        "ZhipuAI/GLM-5.1" | "zai-org/glm-5.1" => Some(202_800),
-        "MiniMax-M3" | "claude-fable-5" => Some(1_000_000),
-        "MiniMaxAI/MiniMax-M2.7" | "Pro/MiniMaxAI/MiniMax-M2.7" | "MiniMax-M2.7" => Some(200_000),
-        "qwen3-coder-plus" | "LongCat-2.0" => Some(1_048_576),
+        "mimo-v2.5" | "mimo-v2.5-pro" | "mimo-v2-pro" => Some(1_048_576),
+        "mimo-v2-omni" => Some(262_144),
+        "glm-5.3" => Some(1_048_576),
+        "glm-5.2" | "glm-5.1" | "glm-5" => Some(204_800),
+        "minimax-m3" | "claude-fable-5" => Some(1_000_000),
+        "minimax-m2.7"
+        | "minimax-m2.7-highspeed"
+        | "minimax-m2.5"
+        | "minimax-m2.5-highspeed"
+        | "minimax-m2.1"
+        | "minimax-m2.1-highspeed"
+        | "minimax-m2" => Some(204_800),
+        "qwen3-coder-plus" | "longcat-2.0" => Some(1_048_576),
+        "qwen3.8-max" | "qwen3.7-max" | "qwen3.7-plus" | "qwen3.6-plus" | "qwen3.5-plus" => {
+            Some(1_000_000)
+        }
         "hy3" | "hy3-preview" | "ark-code-latest" => Some(256_000),
-        "Ling-2.6-1T"
+        "ling-2.6-1t"
         | "doubao-seed-2-1-pro-260628"
         | "step-3.5-flash"
         | "step-3.5-flash-2603"
@@ -4904,7 +4927,10 @@ base_url = "https://production.api/v1"
                 "models": [
                     { "model": "glm-5.2", "displayName": "GLM 5.2" },
                     { "model": "glm-5.2@opencode", "displayName": "GLM 5.2" },
-                    { "model": "openai/gpt-5.6-sol", "displayName": "GPT-5.6" }
+                    { "model": "openai/gpt-5.6-sol", "displayName": "GPT-5.6" },
+                    { "model": "glm-5.3", "displayName": "GLM 5.3" },
+                    { "model": "minimax-m3", "displayName": "MiniMax M3" },
+                    { "model": "MiniMax-M2.7", "displayName": "MiniMax M2.7" }
                 ]
             }
         });
@@ -4926,6 +4952,9 @@ base_url = "https://production.api/v1"
         assert_eq!(window("glm-5.2"), Some(204_800));
         assert_eq!(window("glm-5.2@opencode"), Some(204_800));
         assert_eq!(window("openai/gpt-5.6-sol"), Some(272_000));
+        assert_eq!(window("glm-5.3"), Some(1_048_576));
+        assert_eq!(window("minimax-m3"), Some(1_000_000));
+        assert_eq!(window("MiniMax-M2.7"), Some(204_800));
     }
 
     #[test]

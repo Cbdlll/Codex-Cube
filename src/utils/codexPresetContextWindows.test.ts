@@ -10,6 +10,14 @@ describe("codexPresetContextWindows", () => {
     expect(presetContextWindowForModel("glm-5.2@opencode")).toBe(204800);
     expect(presetContextWindowForModel("openai/gpt-5.6-sol")).toBe(272000);
     expect(presetContextWindowForModel("deepseek-v4-flash")).toBe(1048576);
+    expect(presetContextWindowForModel("glm-5.3")).toBe(1048576);
+    expect(presetContextWindowForModel("glm-5.3[1m]")).toBe(1048576);
+    expect(presetContextWindowForModel("minimax-m3")).toBe(1000000);
+    expect(presetContextWindowForModel("MiniMax-M2.7")).toBe(204800);
+    expect(presetContextWindowForModel("minimax-m2.5")).toBe(204800);
+    expect(presetContextWindowForModel("qwen3.8-max")).toBe(1000000);
+    expect(presetContextWindowForModel("kimi-k2.6")).toBe(262144);
+    expect(presetContextWindowForModel("mimo-v2-omni")).toBe(262144);
   });
 
   it("keeps an explicit window and only fills when the field is empty", () => {
