@@ -2990,6 +2990,10 @@ pub fn merge_codex_live_user_settings_into_backup(backup: &Value, live: &Value) 
 /// Codex Desktop 里改过的 `model_reasoning_effort`、personality、`[desktop]`
 /// 等从未进入供应商自己的 `config.toml`，编辑页看起来像「默认推理强度不在
 /// provider 里」。这里按字段合并：路由投影仍由接管生成，用户偏好落进存储。
+///
+/// `defaultModel` 除外：那是 Cube 向导里的默认模型，不能跟着 Codex 会话换模型
+/// 一起改，否则打开供应商列表就会看到默认模型自己变了。仅当存储里没有合法
+/// 默认模型时，才用 live / 列表首项补齐。
 pub fn merge_codex_live_user_settings_into_aggregate(
     provider_settings: &Value,
     live: &Value,
@@ -3048,21 +3052,21 @@ pub fn merge_codex_live_user_settings_into_aggregate(
                 .collect()
         })
         .unwrap_or_default();
+    let in_catalog = |model: &str| catalog_models.iter().any(|item| item == model);
     let live_model = live_doc
         .as_ref()
         .and_then(|doc| doc.get("model").and_then(toml_edit::Item::as_str))
         .map(str::trim)
-        .filter(|model| !model.is_empty())
+        .filter(|model| !model.is_empty() && in_catalog(model))
         .map(str::to_string);
     let stored_default = result_obj
         .get("defaultModel")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|model| !model.is_empty())
+        .filter(|model| !model.is_empty() && in_catalog(model))
         .map(str::to_string);
-    let model = live_model
-        .filter(|model| catalog_models.iter().any(|item| item == model))
-        .or(stored_default)
+    let model = stored_default
+        .or(live_model)
         .or_else(|| catalog_models.first().cloned());
     if let Some(model) = model {
         merged["model"] = toml_edit::value(model.as_str());
@@ -6774,6 +6778,68 @@ base_url = "http://127.0.0.1:9999/v1"
                 .map(|rows| rows.len()),
             Some(1),
             "member model mappings must not be replaced"
+        );
+    }
+
+    #[test]
+    fn merge_live_user_settings_into_aggregate_does_not_overwrite_default_model() {
+        let stored = json!({
+            "auth": {},
+            "defaultModel": "glm-5.2",
+            "memberProviderIds": ["opencode"],
+            "aggregateModels": [
+                { "model": "glm-5.2", "providerId": "opencode", "upstreamModel": "glm-5.2" },
+                { "model": "kimi-k3", "providerId": "opencode", "upstreamModel": "kimi-k3" }
+            ],
+            "config": "model_provider = \"custom\"\nmodel = \"glm-5.2\"\nmodel_reasoning_effort = \"high\"\n"
+        });
+        let live = json!({
+            "auth": {},
+            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\nmodel_reasoning_effort = \"max\"\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n"
+        });
+
+        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
+        let cfg = merged
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config");
+        assert_eq!(
+            merged.get("defaultModel").and_then(Value::as_str),
+            Some("glm-5.2"),
+            "Codex session model must not overwrite the Cube default model"
+        );
+        assert!(
+            cfg.contains("model = \"glm-5.2\""),
+            "stored aggregate config.toml model must stay the Cube default, got: {cfg}"
+        );
+        assert_eq!(
+            merged.get("defaultReasoningEffort").and_then(Value::as_str),
+            Some("max"),
+            "Desktop reasoning effort is still a user preference and may sync"
+        );
+    }
+
+    #[test]
+    fn merge_live_user_settings_into_aggregate_bootstraps_missing_default_model() {
+        let stored = json!({
+            "auth": {},
+            "memberProviderIds": ["opencode"],
+            "aggregateModels": [
+                { "model": "glm-5.2", "providerId": "opencode", "upstreamModel": "glm-5.2" },
+                { "model": "kimi-k3", "providerId": "opencode", "upstreamModel": "kimi-k3" }
+            ],
+            "config": "model_provider = \"custom\"\n"
+        });
+        let live = json!({
+            "auth": {},
+            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\n"
+        });
+
+        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
+        assert_eq!(
+            merged.get("defaultModel").and_then(Value::as_str),
+            Some("kimi-k3"),
+            "live model may initialize defaultModel only when Cube has none"
         );
     }
 

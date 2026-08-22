@@ -57,6 +57,8 @@ jobs:
           releaseBody: |
             1.0.2
 
+            - Keep the aggregate provider default model when Codex Desktop switches models in a session
+            - Explain OpenCode Go HTTP 403 `{"model":"..."}` as a provider entitlement, not a local /responses mismatch
             - Fill OpenCode Go and aggregate context windows from Cube provider presets when `/v1/models` omits them, matching ordinary existing-config providers
             - Built-in context windows for OpenCode Go `/v1/models` ids including MiniMax M3/M2.x, GLM-5.3, Qwen 3.x, and Kimi K2.6
             - Keep a hand-edited context window when fetching or saving aggregate and catalog models

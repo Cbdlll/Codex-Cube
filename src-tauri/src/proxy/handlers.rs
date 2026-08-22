@@ -16,6 +16,7 @@ use super::{
     providers::{
         codex_chat_common::extract_reasoning_field_text,
         codex_chat_history::record_responses_sse_stream,
+        should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
         streaming_codex_anthropic::{
             create_responses_sse_stream_from_anthropic_with_context,
             responses_sse_events_from_anthropic_message,
@@ -1264,6 +1265,7 @@ fn build_codex_proxy_error_response(
         endpoint,
         error,
         outbound_model.as_deref(),
+        Some(codex_upstream_wire_label(&ctx.provider, endpoint)),
     );
     let body = serde_json::to_vec(&body).map_err(|e| {
         log::error!("[Codex] 序列化代理错误体失败: {e}");
@@ -1283,12 +1285,46 @@ fn build_codex_proxy_error_response(
         })
 }
 
+fn codex_upstream_wire_label(provider: &crate::provider::Provider, endpoint: &str) -> &'static str {
+    if should_convert_codex_responses_to_chat(provider, endpoint) {
+        "Chat Completions /v1/chat/completions"
+    } else if should_convert_codex_responses_to_anthropic(provider, endpoint) {
+        "Anthropic Messages /v1/messages"
+    } else {
+        "Responses /v1/responses"
+    }
+}
+
+/// OpenCode Go (and similar gateways) reject a model with HTTP 403 and a body
+/// that is only `{"model":"<id>"}`. That is an entitlement decision, not a
+/// local `/responses` protocol failure.
+fn is_sparse_model_forbidden_cause(cause: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(cause.trim()) else {
+        return false;
+    };
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    obj.len() == 1
+        && obj
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| !model.trim().is_empty())
+}
+
+fn is_responses_format_unsupported_cause(cause: &str) -> bool {
+    let lowered = cause.to_ascii_lowercase();
+    lowered.contains("not supported for format openai")
+        || lowered.contains("not supported for format responses")
+}
+
 fn codex_proxy_error_json(
     provider_name: &str,
     request_model: &str,
     endpoint: &str,
     error: &ProxyError,
     outbound_model: Option<&str>,
+    upstream_wire: Option<&str>,
 ) -> Value {
     let (mut body, upstream_status) = match error {
         ProxyError::UpstreamError { status, body } => {
@@ -1326,6 +1362,7 @@ fn codex_proxy_error_json(
         .filter(|model| *model != request_model)
         .map(|model| format!(" (上游: {model})"))
         .unwrap_or_default();
+    let wire = upstream_wire.unwrap_or("Responses /v1/responses");
 
     let message = if upstream_status == Some(413) {
         // 413 来自上游渠道商的网关（典型是 nginx 的 client_max_body_size），不是 CC
@@ -1354,12 +1391,54 @@ fn codex_proxy_error_json(
             .map(ToString::to_string)
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| get_error_message(error));
-        let status_fragment = upstream_status
-            .map(|status| format!("; upstream_status: HTTP {status}"))
-            .unwrap_or_default();
-        format!(
-            "Codex-Cube local proxy failed while handling Codex endpoint {endpoint}. Provider: {provider_name}; model: {request_model}{upstream_fragment}{status_fragment}; cause: {cause}"
-        )
+        if upstream_status == Some(403) && is_sparse_model_forbidden_cause(&cause) {
+            // OpenCode Go 等网关用 HTTP 403 + `{"model":"<id>"}` 表示当前 key
+            // 无权使用该模型（额度/套餐/区域），不是本地把 /responses 打错协议。
+            format!(
+                concat!(
+                    "Upstream provider forbade model `{model}` with HTTP 403. ",
+                    "The local proxy already forwarded this as {wire}; this is not a Codex ",
+                    "/responses protocol mismatch. A {{\"model\":\"...\"}} 403 means the ",
+                    "provider rejected this model for the current key (plan allocation ",
+                    "exhausted, region lock, or model not included). Other models on the ",
+                    "same provider may still work. Check the provider console, switch model, ",
+                    "or wait for the allocation to reset. ",
+                    "Provider: {provider}; model: {model}{upstream_fragment}; ",
+                    "Codex endpoint: {endpoint}; upstream: {wire}."
+                ),
+                provider = provider_name,
+                model = request_model,
+                upstream_fragment = upstream_fragment,
+                endpoint = endpoint,
+                wire = wire,
+            )
+        } else if (upstream_status == Some(401) || upstream_status == Some(400))
+            && is_responses_format_unsupported_cause(&cause)
+        {
+            format!(
+                concat!(
+                    "Upstream rejected model `{model}` because it does not support the ",
+                    "OpenAI Responses format. Set this model's upstream format to Chat ",
+                    "Completions (or Anthropic Messages) in the provider / aggregate ",
+                    "mapping so the local proxy converts /responses before forwarding. ",
+                    "Provider: {provider}; model: {model}{upstream_fragment}; ",
+                    "Codex endpoint: {endpoint}; upstream: {wire}; cause: {cause}."
+                ),
+                provider = provider_name,
+                model = request_model,
+                upstream_fragment = upstream_fragment,
+                endpoint = endpoint,
+                wire = wire,
+                cause = cause,
+            )
+        } else {
+            let status_fragment = upstream_status
+                .map(|status| format!("; upstream_status: HTTP {status}"))
+                .unwrap_or_default();
+            format!(
+                "Codex-Cube local proxy failed while handling Codex endpoint {endpoint} (upstream {wire}). Provider: {provider_name}; model: {request_model}{upstream_fragment}{status_fragment}; cause: {cause}"
+            )
+        }
     };
 
     error_obj.insert(
@@ -1417,6 +1496,10 @@ fn codex_proxy_error_json(
     );
     // 仅用于 Codex 本地路由；不要复用到 query 可能携带凭证的端点。
     error_obj.insert("endpoint".to_string(), Value::String(endpoint.to_string()));
+    error_obj.insert(
+        "upstream_wire".to_string(),
+        Value::String(wire.to_string()),
+    );
     if let Some(status) = upstream_status {
         error_obj.insert(
             "upstream_status".to_string(),
@@ -2118,8 +2201,8 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
-        codex_proxy_error_json, responses_sse_to_response_value, upstream_body_parse_error,
-        ProxyState, RequestContext,
+        codex_proxy_error_json, is_sparse_model_forbidden_cause, responses_sse_to_response_value,
+        upstream_body_parse_error, ProxyState, RequestContext,
     };
     use crate::database::Database;
     use crate::proxy::ProxyError;
@@ -2761,7 +2844,8 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
     #[test]
     fn codex_proxy_forward_error_includes_context_and_cause() {
         let error = ProxyError::ForwardFailed("连接失败: dns lookup failed".to_string());
-        let body = codex_proxy_error_json("DeepSeek", "deepseek-chat", "/responses", &error, None);
+        let body =
+            codex_proxy_error_json("DeepSeek", "deepseek-chat", "/responses", &error, None, None);
 
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("Codex-Cube local proxy failed"));
@@ -2783,7 +2867,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
                     .to_string(),
             ),
         };
-        let body = codex_proxy_error_json("MiniMax", "abab6.5s", "/responses", &error, None);
+        let body = codex_proxy_error_json("MiniMax", "abab6.5s", "/responses", &error, None, None);
 
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("upstream_status: HTTP 502"));
@@ -2805,7 +2889,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
                     .to_string(),
             ),
         };
-        let body = codex_proxy_error_json("HCAI", "gpt-5.5", "/responses", &error, None);
+        let body = codex_proxy_error_json("HCAI", "gpt-5.5", "/responses", &error, None, None);
 
         let message = body["error"]["message"].as_str().unwrap();
         // 不再误导成「本地代理失败」
@@ -2835,6 +2919,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             "/responses",
             &error,
             Some("deepseek-v4-flash"),
+            None,
         );
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("model: gpt-5.6-luna (上游: deepseek-v4-flash)"));
@@ -2863,6 +2948,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             "/responses",
             &error,
             Some("deepseek-v4-flash"),
+            None,
         );
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("model: gpt-5.6-luna (上游: deepseek-v4-flash)"));
@@ -2881,6 +2967,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             "/responses",
             &error,
             Some("deepseek-v4-flash"),
+            None,
         );
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("model: deepseek-v4-flash"));
@@ -2891,7 +2978,8 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
 
         // 出站模型未知（请求未发出即失败，如认证错误）：outbound_model 为 null，
         // error.model 回落为请求模型。
-        let body = codex_proxy_error_json("OpenCode", "gpt-5.6-luna", "/responses", &error, None);
+        let body =
+            codex_proxy_error_json("OpenCode", "gpt-5.6-luna", "/responses", &error, None, None);
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("model: gpt-5.6-luna"));
         assert!(!message.contains("(上游:"));
@@ -2901,6 +2989,70 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             body["error"]["model"], "gpt-5.6-luna",
             "error.model must fall back to request_model when outbound is unknown"
         );
+    }
+
+    #[test]
+    fn codex_proxy_403_sparse_model_body_is_provider_entitlement_not_local_protocol() {
+        let error = ProxyError::UpstreamError {
+            status: 403,
+            body: Some(r#"{"model":"kimi-k3"}"#.to_string()),
+        };
+        let body = codex_proxy_error_json(
+            "OpenCode",
+            "kimi-k3",
+            "/responses",
+            &error,
+            Some("kimi-k3"),
+            Some("Chat Completions /v1/chat/completions"),
+        );
+
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(!message.contains("Codex-Cube local proxy failed"));
+        assert!(message.contains("HTTP 403"));
+        assert!(message.contains("kimi-k3"));
+        assert!(message.contains("Chat Completions /v1/chat/completions"));
+        assert!(message.contains("plan allocation"));
+        assert_eq!(body["error"]["upstream_status"], 403);
+        assert_eq!(
+            body["error"]["upstream_wire"],
+            "Chat Completions /v1/chat/completions"
+        );
+        assert_eq!(body["error"]["model"], "kimi-k3");
+    }
+
+    #[test]
+    fn codex_proxy_401_responses_format_tells_user_to_set_chat_completions() {
+        let error = ProxyError::UpstreamError {
+            status: 401,
+            body: Some(
+                r#"{"type":"error","error":{"type":"ModelError","message":"Model kimi-k3 is not supported for format openai"}}"#
+                    .to_string(),
+            ),
+        };
+        let body = codex_proxy_error_json(
+            "OpenCode",
+            "kimi-k3",
+            "/responses",
+            &error,
+            Some("kimi-k3"),
+            Some("Responses /v1/responses"),
+        );
+
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(!message.contains("Codex-Cube local proxy failed"));
+        assert!(message.contains("does not support the OpenAI Responses format"));
+        assert!(message.contains("Chat Completions"));
+        assert!(message.contains("kimi-k3"));
+        assert_eq!(body["error"]["upstream_status"], 401);
+    }
+
+    #[test]
+    fn sparse_model_forbidden_cause_detects_opencode_body() {
+        assert!(is_sparse_model_forbidden_cause(r#"{"model":"kimi-k3"}"#));
+        assert!(!is_sparse_model_forbidden_cause(
+            "This model is not available in your region."
+        ));
+        assert!(!is_sparse_model_forbidden_cause(r#"{"error":"forbidden"}"#));
     }
 
     #[tokio::test]
