@@ -2786,46 +2786,18 @@ pub fn build_aggregate_takeover_toml(
 
     doc["model_provider"] = toml_edit::value("custom");
     let aggregate_entries = codex_aggregate_model_entries(&provider.settings_config);
-    // 默认模型优先级：聚合 Provider 显式保存的 defaultModel（用户在添加/编辑
-    // 聚合供应商页面选择的默认模型）> 现有 config.toml 里的 model（保留桌面端
-    // 当前选择，避免每次重新投影被悄悄改回）> 聚合模型列表首项。
-    let explicit_default = provider
-        .settings_config
-        .get("defaultModel")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .filter(|model| aggregate_entries.iter().any(|entry| entry.model == *model));
-    let existing_model = doc
-        .get("model")
-        .and_then(toml_edit::Item::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty());
-    let model = explicit_default
-        .or_else(|| {
-            existing_model
-                .filter(|model| aggregate_entries.iter().any(|entry| entry.model == *model))
-        })
-        .or_else(|| aggregate_entries.first().map(|entry| entry.model.as_str()));
-    match model {
-        Some(model) => {
-            doc["model"] = toml_edit::value(model);
-        }
-        None => {
-            doc.as_table_mut().remove("model");
-        }
+    // 默认模型只来自 Cube 保存的聚合配置（defaultModel / 存储 config），
+    // 不能沿用 existing_config 里的 Live 会话选择——那可能是成员供应商或
+    // Desktop 里临时换过的模型。
+    if let Some(model) = resolve_aggregate_default_model(&provider.settings_config, &aggregate_entries)
+    {
+        doc["model"] = toml_edit::value(model);
+    } else {
+        doc.as_table_mut().remove("model");
     }
 
-    // 默认推理强度与普通供应商一致：写入顶层 `model_reasoning_effort`。
-    // 优先级：向导显式保存的 defaultReasoningEffort > 现有 config.toml
-    //（保留桌面端当前选择）> high。
-    let effort = settings_default_reasoning_effort(&provider.settings_config)
-        .or_else(|| {
-            doc.get("model_reasoning_effort")
-                .and_then(toml_edit::Item::as_str)
-                .and_then(normalize_codex_reasoning_effort)
-        })
-        .unwrap_or("high");
+    // 默认推理强度同样只认 Cube 保存值，Live 会话档位不回写聚合默认值。
+    let effort = settings_default_reasoning_effort(&provider.settings_config).unwrap_or("high");
     doc["model_reasoning_effort"] = toml_edit::value(effort);
 
     // 顶层 base_url 属于接管前的旧供应商；聚合路由只走 [model_providers.custom]。
@@ -2871,6 +2843,7 @@ const CODEX_TAKEOVER_PROJECTED_KEYS: &[&str] = &[
 /// catalog 路径写进虚拟供应商。
 const CODEX_AGGREGATE_STORED_SKIP_KEYS: &[&str] = &[
     "model",
+    "model_reasoning_effort",
     "model_provider",
     "base_url",
     "wire_api",
@@ -2987,13 +2960,14 @@ pub fn merge_codex_live_user_settings_into_backup(backup: &Value, live: &Value) 
 /// 把 Live 里的用户设置写回聚合供应商，但不覆盖成员/模型映射，也不收下 auth。
 ///
 /// 聚合供应商跳过了普通的 live 整包回填，否则 `aggregateModels` 会丢。结果是
-/// Codex Desktop 里改过的 `model_reasoning_effort`、personality、`[desktop]`
-/// 等从未进入供应商自己的 `config.toml`，编辑页看起来像「默认推理强度不在
-/// provider 里」。这里按字段合并：路由投影仍由接管生成，用户偏好落进存储。
+/// Codex Desktop 里改过的 personality、`[desktop]` 等从未进入供应商自己的
+/// `config.toml`。这里按字段合并：路由投影仍由接管生成，用户偏好落进存储；
+/// `defaultModel` / `defaultReasoningEffort` 只认 Cube 向导保存值。
 ///
-/// `defaultModel` 除外：那是 Cube 向导里的默认模型，不能跟着 Codex 会话换模型
-/// 一起改，否则打开供应商列表就会看到默认模型自己变了。仅当存储里没有合法
-/// 默认模型时，才用 live / 列表首项补齐。
+/// `defaultModel` / `defaultReasoningEffort` 是用户在 Cube 向导里保存的值，
+/// 不能被 Codex 会话或成员供应商 Live 配置覆盖。仅当用户从未配置默认值时，
+/// 才用 live / 目录首项做首次补齐；目录失效时由 `repair_aggregate_defaults`
+/// 自动改到仍存在的首个模型。
 pub fn merge_codex_live_user_settings_into_aggregate(
     provider_settings: &Value,
     live: &Value,
@@ -3059,29 +3033,35 @@ pub fn merge_codex_live_user_settings_into_aggregate(
         .map(str::trim)
         .filter(|model| !model.is_empty() && in_catalog(model))
         .map(str::to_string);
-    let stored_default = result_obj
-        .get("defaultModel")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty() && in_catalog(model))
-        .map(str::to_string);
-    let model = stored_default
-        .or(live_model)
-        .or_else(|| catalog_models.first().cloned());
+    let user_model = read_aggregate_stored_default_model(provider_settings);
+    let mut repaired_default = false;
+    let model = match user_model {
+        Some(model) if in_catalog(&model) => Some(model),
+        Some(_) => {
+            repaired_default = true;
+            catalog_models.first().cloned()
+        }
+        None => live_model.or_else(|| catalog_models.first().cloned()),
+    };
     if let Some(model) = model {
         merged["model"] = toml_edit::value(model.as_str());
         result_obj.insert("defaultModel".to_string(), json!(model));
+        if repaired_default {
+            log::info!(
+                "聚合默认模型已失效，自动切换到仍存在的模型 \"{model}\""
+            );
+        }
     }
 
-    let effort = live_doc
+    let stored_effort = settings_default_reasoning_effort(provider_settings);
+    let live_effort = live_doc
         .as_ref()
         .and_then(|doc| {
             doc.get("model_reasoning_effort")
                 .and_then(toml_edit::Item::as_str)
         })
-        .and_then(normalize_codex_reasoning_effort)
-        .or_else(|| settings_default_reasoning_effort(provider_settings))
-        .unwrap_or("high");
+        .and_then(normalize_codex_reasoning_effort);
+    let effort = stored_effort.or(live_effort).unwrap_or("high");
     merged["model_reasoning_effort"] = toml_edit::value(effort);
     result_obj.insert("defaultReasoningEffort".to_string(), json!(effort));
 
@@ -3293,10 +3273,89 @@ fn settings_default_reasoning_effort(settings: &Value) -> Option<&'static str> {
         return Some(effort);
     }
     let config = settings.get("config").and_then(Value::as_str)?;
-    let doc = config.parse::<DocumentMut>().ok()?;
+    let doc = parse_codex_toml_document(config).ok()?;
     doc.get("model_reasoning_effort")
         .and_then(toml_edit::Item::as_str)
         .and_then(normalize_codex_reasoning_effort)
+}
+
+/// Read the user-configured aggregate default model without catalog validation.
+fn read_aggregate_stored_default_model(settings: &Value) -> Option<String> {
+    settings
+        .get("defaultModel")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            settings
+                .get("config")
+                .and_then(Value::as_str)
+                .and_then(codex_top_level_model)
+        })
+}
+
+fn aggregate_model_in_catalog(model: &str, entries: &[CodexAggregateModelEntry]) -> bool {
+    entries.iter().any(|entry| entry.model == model)
+}
+
+/// When the default model slot no longer exists in the aggregate catalog (for
+/// example after a member provider is deleted), fall back to the first remaining
+/// slot and keep the user's reasoning effort unchanged.
+pub(crate) fn repair_aggregate_defaults(settings: &mut Value) -> bool {
+    let entries = codex_aggregate_model_entries(settings);
+    let Some(fallback_model) = entries.first().map(|entry| entry.model.clone()) else {
+        return false;
+    };
+
+    let current = read_aggregate_stored_default_model(settings);
+    let needs_repair = match current.as_deref() {
+        None => false,
+        Some(model) => !aggregate_model_in_catalog(model, &entries),
+    };
+    if !needs_repair {
+        return false;
+    }
+
+    let effort = settings_default_reasoning_effort(settings).unwrap_or("high");
+    let stored_cfg = settings
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let Some(root) = settings.as_object_mut() else {
+        return false;
+    };
+    root.insert("defaultModel".to_string(), json!(fallback_model));
+
+    let mut merged = if stored_cfg.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        parse_codex_toml_document(&stored_cfg).unwrap_or_else(|_| DocumentMut::new())
+    };
+    merged["model_provider"] = toml_edit::value("custom");
+    merged["model"] = toml_edit::value(fallback_model.as_str());
+    merged["model_reasoning_effort"] = toml_edit::value(effort);
+    root.insert("config".to_string(), json!(merged.to_string()));
+    root.insert("defaultReasoningEffort".to_string(), json!(effort));
+    true
+}
+
+/// Resolve the aggregate default model for takeover projection.
+fn resolve_aggregate_default_model(
+    settings: &Value,
+    aggregate_entries: &[CodexAggregateModelEntry],
+) -> Option<String> {
+    if let Some(model) = read_aggregate_stored_default_model(settings) {
+        if aggregate_model_in_catalog(&model, aggregate_entries) {
+            return Some(model);
+        }
+        return aggregate_entries.first().map(|entry| entry.model.clone());
+    }
+    aggregate_entries
+        .first()
+        .map(|entry| entry.model.clone())
 }
 
 /// Normalize generated `model_catalog_json` and `models_cache.json` entries to
@@ -6523,7 +6582,7 @@ command = "/bin/true"
     }
 
     #[test]
-    fn aggregate_build_takeover_toml_preserves_existing_valid_model_slot() {
+    fn aggregate_build_takeover_toml_uses_catalog_first_model_without_explicit_default() {
         let provider = crate::provider::Provider::with_id(
             "agg-1".to_string(),
             "My Aggregate".to_string(),
@@ -6552,8 +6611,8 @@ base_url = "http://127.0.0.1:9999/v1"
         assert_eq!(parsed["model_provider"].as_str(), Some("custom"));
         assert_eq!(
             parsed["model"].as_str(),
-            Some("gpt-5.6-sol"),
-            "the desktop-selected aggregate slot must survive takeover re-projection"
+            Some("gpt-5.4"),
+            "live Desktop model must not override the Cube aggregate default slot"
         );
     }
 
@@ -6608,7 +6667,7 @@ base_url = "http://127.0.0.1:9999/v1"
         assert_eq!(
             parsed["model"].as_str(),
             Some("gpt-5.5@neko"),
-            "invalid explicit default must fall back to the existing valid model"
+            "invalid explicit default must fall back to the first catalog model"
         );
     }
 
@@ -6665,7 +6724,7 @@ base_url = "http://127.0.0.1:9999/v1"
     }
 
     #[test]
-    fn aggregate_build_takeover_toml_preserves_live_reasoning_effort_without_explicit() {
+    fn aggregate_build_takeover_toml_defaults_reasoning_effort_without_explicit() {
         let provider = crate::provider::Provider::with_id(
             "agg-1".to_string(),
             "My Aggregate".to_string(),
@@ -6684,8 +6743,8 @@ base_url = "http://127.0.0.1:9999/v1"
 
         assert_eq!(
             parsed["model_reasoning_effort"].as_str(),
-            Some("xhigh"),
-            "live Desktop reasoning effort must survive when the wizard has no explicit default"
+            Some("high"),
+            "live Desktop reasoning effort must not override the Cube aggregate default"
         );
     }
 
@@ -6782,6 +6841,108 @@ base_url = "http://127.0.0.1:9999/v1"
     }
 
     #[test]
+    fn aggregate_build_takeover_toml_keeps_user_default_model_over_live_session() {
+        let provider = crate::provider::Provider::with_id(
+            "agg-1".to_string(),
+            "My Aggregate".to_string(),
+            json!({
+                "defaultModel": "gpt-5.6-sol",
+                "aggregateModels": [
+                    { "model": "gpt-5.4", "providerId": "neko", "upstreamModel": "gpt-5.6-sol" },
+                    { "model": "gpt-5.6-sol", "providerId": "opencode", "upstreamModel": "gpt-5.6-luna" }
+                ],
+                "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"low\"\n"
+            }),
+            None,
+        );
+        let existing = r#"
+model_provider = "custom"
+model = "gpt-5.4"
+model_reasoning_effort = "max"
+"#;
+        let toml_text =
+            build_aggregate_takeover_toml(&provider, "http://127.0.0.1:15721/v1", existing)
+                .expect("build aggregate takeover toml");
+        let parsed: toml::Value = toml::from_str(&toml_text).expect("valid TOML");
+
+        assert_eq!(parsed["model"].as_str(), Some("gpt-5.6-sol"));
+        assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("low"));
+    }
+
+    #[test]
+    fn repair_aggregate_defaults_after_member_model_removed() {
+        let mut settings = json!({
+            "defaultModel": "kimi-k3",
+            "defaultReasoningEffort": "max",
+            "memberProviderIds": ["opencode"],
+            "aggregateModels": [
+                { "model": "glm-5.2", "providerId": "opencode", "upstreamModel": "glm-5.2" }
+            ],
+            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\nmodel_reasoning_effort = \"max\"\n"
+        });
+
+        assert!(repair_aggregate_defaults(&mut settings));
+        assert_eq!(
+            settings.get("defaultModel").and_then(Value::as_str),
+            Some("glm-5.2")
+        );
+        assert_eq!(
+            settings.get("defaultReasoningEffort").and_then(Value::as_str),
+            Some("max"),
+            "reasoning effort stays what the user configured"
+        );
+        let cfg = settings
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config");
+        assert!(cfg.contains("model = \"glm-5.2\""));
+        assert!(cfg.contains("model_reasoning_effort = \"max\""));
+    }
+
+    #[test]
+    fn repair_aggregate_defaults_is_noop_for_valid_user_model() {
+        let mut settings = json!({
+            "defaultModel": "glm-5.2",
+            "aggregateModels": [
+                { "model": "glm-5.2", "providerId": "opencode", "upstreamModel": "glm-5.2" }
+            ],
+            "config": "model_provider = \"custom\"\nmodel = \"glm-5.2\"\nmodel_reasoning_effort = \"high\"\n"
+        });
+        assert!(!repair_aggregate_defaults(&mut settings));
+        assert_eq!(
+            settings.get("defaultModel").and_then(Value::as_str),
+            Some("glm-5.2")
+        );
+    }
+
+    #[test]
+    fn merge_live_user_settings_into_aggregate_repairs_orphan_default_model() {
+        let stored = json!({
+            "defaultModel": "kimi-k3",
+            "memberProviderIds": ["opencode"],
+            "aggregateModels": [
+                { "model": "glm-5.2", "providerId": "opencode", "upstreamModel": "glm-5.2" }
+            ],
+            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\nmodel_reasoning_effort = \"high\"\n"
+        });
+        let live = json!({
+            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\nmodel_reasoning_effort = \"max\"\n"
+        });
+
+        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
+        assert_eq!(
+            merged.get("defaultModel").and_then(Value::as_str),
+            Some("glm-5.2"),
+            "orphaned default model must fall back to the first remaining slot"
+        );
+        assert_eq!(
+            merged.get("defaultReasoningEffort").and_then(Value::as_str),
+            Some("high"),
+            "user reasoning effort must stay unchanged during repair"
+        );
+    }
+
+    #[test]
     fn merge_live_user_settings_into_aggregate_does_not_overwrite_default_model() {
         let stored = json!({
             "auth": {},
@@ -6814,8 +6975,8 @@ base_url = "http://127.0.0.1:9999/v1"
         );
         assert_eq!(
             merged.get("defaultReasoningEffort").and_then(Value::as_str),
-            Some("max"),
-            "Desktop reasoning effort is still a user preference and may sync"
+            Some("high"),
+            "Codex session reasoning effort must not overwrite the Cube default"
         );
     }
 
@@ -6871,7 +7032,8 @@ base_url = "http://127.0.0.1:9999/v1"
         );
         assert_eq!(
             merged.get("defaultReasoningEffort").and_then(Value::as_str),
-            Some("max")
+            Some("low"),
+            "stored duplicate config.toml reasoning effort must win over live"
         );
         toml::from_str::<toml::Table>(cfg).expect("merged config must be valid TOML");
     }

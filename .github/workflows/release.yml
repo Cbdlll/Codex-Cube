@@ -57,6 +57,8 @@ jobs:
           releaseBody: |
             1.0.2
 
+            - Keep aggregate default model and reasoning effort independent from Codex session and member provider live settings
+            - Auto-repair aggregate default model when its member provider is deleted, preserving user reasoning effort
             - Keep the aggregate provider default model when Codex Desktop switches models in a session
             - Explain OpenCode Go HTTP 403 `{"model":"..."}` as a provider entitlement, not a local /responses mismatch
             - Fill OpenCode Go and aggregate context windows from Cube provider presets when `/v1/models` omits them, matching ordinary existing-config providers

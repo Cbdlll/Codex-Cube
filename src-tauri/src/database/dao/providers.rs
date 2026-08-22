@@ -79,7 +79,9 @@ fn prune_deleted_codex_aggregate_member(settings: &mut Value, deleted_id: &str) 
         }
     }
 
-    members_changed || aggregate_models_changed || catalog_changed
+    let defaults_repaired = crate::codex_config::repair_aggregate_defaults(settings);
+
+    members_changed || aggregate_models_changed || catalog_changed || defaults_repaired
 }
 
 impl Database {

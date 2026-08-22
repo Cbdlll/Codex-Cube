@@ -548,6 +548,8 @@ export function parseAggregateSettings(settingsConfig: Record<string, any>): {
       (item: AggregateProviderModel) =>
         item.model.trim() && item.providerId.trim(),
     );
+  const inCatalog = (model: string) =>
+    models.some((item) => item.model.trim() === model.trim());
   const storedDefaultModel =
     typeof settingsConfig[AGGREGATE_DEFAULT_MODEL_KEY] === "string"
       ? settingsConfig[AGGREGATE_DEFAULT_MODEL_KEY].trim()
@@ -557,7 +559,10 @@ export function parseAggregateSettings(settingsConfig: Record<string, any>): {
       ? extractCodexModelName(settingsConfig.config)?.trim() ?? ""
       : "";
   const defaultModel =
-    storedDefaultModel || tomlModel || models[0]?.model.trim() || "";
+    storedDefaultModel ||
+    (tomlModel && inCatalog(tomlModel) ? tomlModel : "") ||
+    models[0]?.model.trim() ||
+    "";
   const storedEffort =
     settingsConfig[AGGREGATE_DEFAULT_REASONING_EFFORT_KEY] ??
     settingsConfig.default_reasoning_effort ??
