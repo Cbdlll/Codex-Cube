@@ -710,6 +710,40 @@ wire_api = "responses"
             );
         });
     }
+    #[test]
+    #[serial]
+    fn update_preserves_sort_index_when_payload_omits_it() {
+        with_test_home(|state, _| {
+            let mut provider = Provider::with_id(
+                "agg-keep-sort".to_string(),
+                "Aggregate".to_string(),
+                codex_settings("https://api.agg.example/v1", "sk-agg"),
+                None,
+            );
+            provider.sort_index = Some(3);
+            provider.created_at = Some(1_700_000_000_000);
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed aggregate");
+
+            let mut updated = provider.clone();
+            updated.sort_index = None;
+            updated.created_at = None;
+            updated.name = "Aggregate renamed".to_string();
+            ProviderService::update(state, AppType::Codex, None, updated)
+                .expect("edit aggregate without sortIndex");
+
+            let saved = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("query")
+                .expect("exists");
+            assert_eq!(saved.sort_index, Some(3));
+            assert_eq!(saved.created_at, Some(1_700_000_000_000));
+            assert_eq!(saved.name, "Aggregate renamed");
+        });
+    }
     fn stored_custom_toml_name(provider: &Provider) -> String {
         let config = provider
             .settings_config

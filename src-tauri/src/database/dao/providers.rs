@@ -254,17 +254,22 @@ impl Database {
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
 
-        let existing: Option<(bool, bool)> = tx
+        let existing: Option<(bool, bool, Option<usize>, Option<i64>)> = tx
             .query_row(
-                "SELECT is_current, in_failover_queue FROM providers WHERE id = ?1 AND app_type = ?2",
+                "SELECT is_current, in_failover_queue, sort_index, created_at
+                 FROM providers WHERE id = ?1 AND app_type = ?2",
                 params![provider.id, app_type],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
         let is_update = existing.is_some();
-        let (is_current, in_failover_queue) =
-            existing.unwrap_or((false, provider.in_failover_queue));
+        let (is_current, in_failover_queue, existing_sort_index, existing_created_at) =
+            existing.unwrap_or((false, provider.in_failover_queue, None, None));
+        // Edit payloads (especially the aggregate wizard) often omit sortIndex /
+        // createdAt. Writing NULL would send the card to the end of the list.
+        let sort_index = provider.sort_index.or(existing_sort_index);
+        let created_at = provider.created_at.or(existing_created_at);
 
         if is_update {
             tx.execute(
@@ -289,8 +294,8 @@ impl Database {
                     })?,
                     provider.website_url,
                     provider.category,
-                    provider.created_at,
-                    provider.sort_index,
+                    created_at,
+                    sort_index,
                     provider.notes,
                     provider.icon,
                     provider.icon_color,
@@ -318,8 +323,8 @@ impl Database {
                         .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
                     provider.website_url,
                     provider.category,
-                    provider.created_at,
-                    provider.sort_index,
+                    created_at,
+                    sort_index,
                     provider.notes,
                     provider.icon,
                     provider.icon_color,
@@ -788,5 +793,68 @@ mod ensure_official_seed_tests {
         let db = Database::memory().expect("memory db");
         let result = db.ensure_official_seed_by_id("claude-desktop-official", AppType::Codex);
         assert!(result.is_err(), "(id, app_type) mismatch should be Err");
+    }
+}
+
+#[cfg(test)]
+mod save_provider_sort_index_tests {
+    use crate::app_config::AppType;
+    use crate::database::Database;
+    use crate::provider::Provider;
+    use serde_json::json;
+
+    #[test]
+    fn update_without_sort_index_keeps_existing_position() {
+        let db = Database::memory().expect("memory db");
+        let mut provider = Provider::with_id(
+            "agg-1".to_string(),
+            "Aggregate".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        provider.sort_index = Some(2);
+        provider.created_at = Some(1_700_000_000_000);
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("seed sorted provider");
+
+        let mut updated = provider.clone();
+        updated.sort_index = None;
+        updated.created_at = None;
+        updated.name = "Aggregate renamed".to_string();
+        db.save_provider(AppType::Codex.as_str(), &updated)
+            .expect("save without sortIndex");
+
+        let saved = db
+            .get_provider_by_id("agg-1", AppType::Codex.as_str())
+            .expect("query")
+            .expect("exists");
+        assert_eq!(saved.sort_index, Some(2));
+        assert_eq!(saved.created_at, Some(1_700_000_000_000));
+        assert_eq!(saved.name, "Aggregate renamed");
+    }
+
+    #[test]
+    fn update_with_sort_index_still_writes_new_position() {
+        let db = Database::memory().expect("memory db");
+        let mut provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        provider.sort_index = Some(2);
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("seed");
+
+        let mut updated = provider.clone();
+        updated.sort_index = Some(7);
+        db.save_provider(AppType::Codex.as_str(), &updated)
+            .expect("reorder");
+
+        let saved = db
+            .get_provider_by_id("p1", AppType::Codex.as_str())
+            .expect("query")
+            .expect("exists");
+        assert_eq!(saved.sort_index, Some(7));
     }
 }

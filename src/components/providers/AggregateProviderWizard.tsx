@@ -904,7 +904,11 @@ export function AggregateProviderWizard({
     try {
       if (isEdit && initialProvider && onEdit) {
         await onEdit({
-          provider: { ...base, id: initialProvider.id } as Provider,
+          provider: {
+            ...initialProvider,
+            ...base,
+            id: initialProvider.id,
+          },
           originalId: initialProvider.id,
         });
       } else {
