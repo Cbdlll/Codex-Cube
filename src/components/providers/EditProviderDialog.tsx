@@ -10,6 +10,7 @@ import {
 } from "@/components/providers/forms/ProviderForm";
 import { AggregateProviderWizard } from "@/components/providers/AggregateProviderWizard";
 import { isAggregateProvider } from "@/utils/aggregateProvider";
+import { preserveProviderListPosition } from "@/utils/providerListPosition";
 import { providersApi, vscodeApi } from "@/lib/api";
 
 interface EditProviderDialogProps {
@@ -242,7 +243,7 @@ export function EditProviderDialog({
         string,
         unknown
       >;
-      const updatedProvider: Provider = {
+      const updatedProvider = preserveProviderListPosition(provider, {
         ...provider,
         id: provider.id,
         name: values.name.trim(),
@@ -254,7 +255,7 @@ export function EditProviderDialog({
         ...(values.presetCategory ? { category: values.presetCategory } : {}),
         // 保留或更新 meta 字段
         ...(values.meta ? { meta: values.meta } : {}),
-      };
+      });
 
       await onSubmit({
         provider: updatedProvider,

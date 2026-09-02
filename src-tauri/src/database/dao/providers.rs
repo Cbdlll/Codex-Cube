@@ -266,8 +266,8 @@ impl Database {
         let is_update = existing.is_some();
         let (is_current, in_failover_queue, existing_sort_index, existing_created_at) =
             existing.unwrap_or((false, provider.in_failover_queue, None, None));
-        // Edit payloads (especially the aggregate wizard) often omit sortIndex /
-        // createdAt. Writing NULL would send the card to the end of the list.
+        // Edit payloads (ordinary forms and the aggregate wizard) often omit
+        // sortIndex / createdAt. Writing NULL would send the card to the end.
         let sort_index = provider.sort_index.or(existing_sort_index);
         let created_at = provider.created_at.or(existing_created_at);
 

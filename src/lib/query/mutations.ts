@@ -9,6 +9,8 @@ import { generateUUID } from "@/utils/uuid";
 import { usageKeys } from "@/lib/query/usage";
 import { CODEX_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import { isAggregateProvider } from "@/utils/aggregateProvider";
+import { preserveProviderListPosition } from "@/utils/providerListPosition";
+import type { ProvidersQueryData } from "./queries";
 
 export const useAddProviderMutation = (appId: AppId) => {
   const queryClient = useQueryClient();
@@ -96,8 +98,16 @@ export const useUpdateProviderMutation = (appId: AppId) => {
       provider: Provider;
       originalId?: string;
     }) => {
-      await providersApi.update(provider, appId, originalId);
-      return provider;
+      const cached = queryClient.getQueryData<ProvidersQueryData>([
+        "providers",
+        appId,
+      ]);
+      const existing =
+        cached?.providers?.[originalId ?? provider.id] ??
+        cached?.providers?.[provider.id];
+      const next = preserveProviderListPosition(existing, provider);
+      await providersApi.update(next, appId, originalId);
+      return next;
     },
     onSuccess: async (provider, variables) => {
       await queryClient.invalidateQueries({ queryKey: ["providers", appId] });

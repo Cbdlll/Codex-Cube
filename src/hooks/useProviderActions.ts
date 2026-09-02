@@ -23,6 +23,7 @@ import {
 } from "@/utils/providerCapabilities";
 import { isAggregateProvider } from "@/utils/aggregateProvider";
 import { isOAuthProviderType } from "@/config/constants";
+import { preserveProviderListPosition } from "@/utils/providerListPosition";
 
 /**
  * Hook for managing provider actions (add, update, delete, switch)
@@ -229,13 +230,13 @@ export function useProviderActions(
   const saveUsageScript = useCallback(
     async (provider: Provider, script: UsageScript) => {
       try {
-        const updatedProvider: Provider = {
+        const updatedProvider = preserveProviderListPosition(provider, {
           ...provider,
           meta: {
             ...provider.meta,
             usage_script: script,
           },
-        };
+        });
 
         await providersApi.update(updatedProvider, activeApp);
         await queryClient.invalidateQueries({

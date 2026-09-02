@@ -59,7 +59,7 @@ jobs:
 
             - After copying or renaming a supplier, rewrite Codex `[model_providers].name` so Desktop's header matches the Cube card (leave `name = "OpenAI"` compaction gates untouched)
             - Persist drag-to-reorder of suppliers (`sortIndex` camelCase)
-            - Keep a supplier's list position when editing it (including aggregate providers) instead of moving it to the end
+            - Keep a supplier's list position when editing it (ordinary or aggregate) instead of moving it to the end
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

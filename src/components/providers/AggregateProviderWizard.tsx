@@ -74,6 +74,7 @@ import {
   type CodexReasoningEffort,
 } from "@/utils/aggregateProvider";
 import { resolveCodexContextWindow } from "@/utils/codexPresetContextWindows";
+import { preserveProviderListPosition } from "@/utils/providerListPosition";
 
 const AGGREGATE_FORM_ID = "aggregate-provider-form";
 
@@ -904,11 +905,11 @@ export function AggregateProviderWizard({
     try {
       if (isEdit && initialProvider && onEdit) {
         await onEdit({
-          provider: {
+          provider: preserveProviderListPosition(initialProvider, {
             ...initialProvider,
             ...base,
             id: initialProvider.id,
-          },
+          }),
           originalId: initialProvider.id,
         });
       } else {

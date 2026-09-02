@@ -712,12 +712,12 @@ wire_api = "responses"
     }
     #[test]
     #[serial]
-    fn update_preserves_sort_index_when_payload_omits_it() {
+    fn update_ordinary_codex_provider_preserves_sort_index_when_payload_omits_it() {
         with_test_home(|state, _| {
             let mut provider = Provider::with_id(
-                "agg-keep-sort".to_string(),
-                "Aggregate".to_string(),
-                codex_settings("https://api.agg.example/v1", "sk-agg"),
+                "ordinary-keep-sort".to_string(),
+                "ccode".to_string(),
+                codex_settings("https://api.ccode.example/v1", "sk-ccode"),
                 None,
             );
             provider.sort_index = Some(3);
@@ -725,14 +725,14 @@ wire_api = "responses"
             state
                 .db
                 .save_provider(AppType::Codex.as_str(), &provider)
-                .expect("seed aggregate");
+                .expect("seed ordinary provider");
 
             let mut updated = provider.clone();
             updated.sort_index = None;
             updated.created_at = None;
-            updated.name = "Aggregate renamed".to_string();
+            updated.name = "ccode renamed".to_string();
             ProviderService::update(state, AppType::Codex, None, updated)
-                .expect("edit aggregate without sortIndex");
+                .expect("edit ordinary provider without sortIndex");
 
             let saved = state
                 .db
@@ -741,7 +741,7 @@ wire_api = "responses"
                 .expect("exists");
             assert_eq!(saved.sort_index, Some(3));
             assert_eq!(saved.created_at, Some(1_700_000_000_000));
-            assert_eq!(saved.name, "Aggregate renamed");
+            assert_eq!(saved.name, "ccode renamed");
         });
     }
     fn stored_custom_toml_name(provider: &Provider) -> String {
