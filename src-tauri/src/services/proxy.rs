@@ -1992,6 +1992,13 @@ impl ProxyService {
                     .map_err(|e| format!("更新 Codex 上游模型失败: {e}"))?;
         }
 
+        if let Some(named) = provider.filter(|p| !p.is_aggregate()) {
+            updated = crate::codex_config::sync_codex_custom_provider_display_name(
+                &updated,
+                &named.name,
+            );
+        }
+
         Ok(updated)
     }
 
@@ -4524,6 +4531,73 @@ wire_api = "responses"
         assert_eq!(
             parsed.get("model").and_then(|v| v.as_str()),
             Some("upstream-responses-model")
+        );
+    }
+
+    #[test]
+    fn apply_codex_proxy_toml_config_syncs_display_name_from_cube_provider() {
+        let input = r#"
+model_provider = "custom"
+model = "gpt-5.6-luna"
+
+[model_providers.custom]
+name = "ccode-luna"
+base_url = "https://api.ccode.vip/v1"
+wire_api = "responses"
+"#;
+        let provider = Provider::with_id(
+            "copy-1".to_string(),
+            "free".to_string(),
+            json!({ "config": input }),
+            None,
+        );
+
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            input,
+            "http://127.0.0.1:15721/v1",
+            Some(&provider),
+        )
+        .expect("apply copied provider takeover");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+
+        assert_eq!(
+            parsed["model_providers"]["custom"]["name"].as_str(),
+            Some("free")
+        );
+        assert_eq!(
+            parsed["model_providers"]["custom"]["base_url"].as_str(),
+            Some("http://127.0.0.1:15721/v1")
+        );
+    }
+
+    #[test]
+    fn apply_codex_proxy_toml_config_preserves_openai_display_name_for_compaction() {
+        let input = r#"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+"#;
+        let provider = Provider::with_id(
+            "relay".to_string(),
+            "My Relay".to_string(),
+            json!({ "config": input }),
+            None,
+        );
+
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            input,
+            "http://127.0.0.1:15721/v1",
+            Some(&provider),
+        )
+        .expect("apply compaction provider takeover");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+
+        assert_eq!(
+            parsed["model_providers"]["custom"]["name"].as_str(),
+            Some("OpenAI")
         );
     }
 

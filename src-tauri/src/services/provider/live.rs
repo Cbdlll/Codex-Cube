@@ -543,6 +543,8 @@ pub(crate) fn write_live_with_common_config(
                 log::warn!("读取 Codex Live 权限设置失败，切换将不保留 sandbox/approval 设置: {e}");
             }
         }
+
+        sync_codex_provider_display_name_in_settings(&mut effective_provider);
     }
 
     write_live_snapshot(app_type, &effective_provider)
@@ -687,6 +689,31 @@ pub(crate) fn persist_current_aggregate_user_settings_from_live(
     };
     let live = crate::codex_config::read_codex_live_settings()?;
     persist_aggregate_user_settings_from_live(db, &current_id, &live)
+}
+
+/// Keep stored/live `[model_providers.<active>].name` aligned with Cube's
+/// supplier card name. Skips aggregates and the remote-compaction `OpenAI`
+/// gate inside `sync_codex_custom_provider_display_name`.
+pub(crate) fn sync_codex_provider_display_name_in_settings(provider: &mut Provider) {
+    if provider.is_aggregate() {
+        return;
+    }
+    let Some(config_text) = provider
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let synced =
+        crate::codex_config::sync_codex_custom_provider_display_name(&config_text, &provider.name);
+    if synced == config_text {
+        return;
+    }
+    if let Some(obj) = provider.settings_config.as_object_mut() {
+        obj.insert("config".to_string(), Value::String(synced));
+    }
 }
 
 pub(crate) fn normalize_provider_common_config_for_storage(

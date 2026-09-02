@@ -2715,6 +2715,49 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
     Ok(doc.to_string())
 }
 
+/// Align `[model_providers.<active>].name` with the Cube supplier display name
+/// so Codex Desktop's header matches the provider card after copy/rename.
+///
+/// Leaves reserved built-in provider ids and `name = "OpenAI"` untouched:
+/// the latter is Codex's remote-compaction / `is_openai()` feature gate.
+pub fn sync_codex_custom_provider_display_name(config_text: &str, display_name: &str) -> String {
+    let trimmed = display_name.trim();
+    if trimmed.is_empty() || config_text.trim().is_empty() {
+        return config_text.to_string();
+    }
+
+    let Ok(mut doc) = config_text.parse::<DocumentMut>() else {
+        return config_text.to_string();
+    };
+
+    let Some(provider_id) = active_codex_model_provider_id(&doc) else {
+        return config_text.to_string();
+    };
+    if !is_custom_codex_model_provider_id(&provider_id) {
+        return config_text.to_string();
+    }
+
+    let Some(provider_table) = doc
+        .get_mut("model_providers")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .and_then(|table| table.get_mut(provider_id.as_str()))
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return config_text.to_string();
+    };
+
+    let current_name = provider_table
+        .get("name")
+        .and_then(|item| item.as_str())
+        .map(str::trim);
+    if current_name == Some("OpenAI") || current_name == Some(trimmed) {
+        return config_text.to_string();
+    }
+
+    provider_table.insert("name", toml_edit::value(trimmed));
+    doc.to_string()
+}
+
 /// Remove `base_url` from the active model_provider section only if it matches `predicate`.
 /// Also removes top-level `base_url` if it matches.
 /// Used by proxy cleanup to strip local proxy URLs without touching user-configured URLs.
@@ -4512,6 +4555,48 @@ wire_api = "responses"
             .and_then(|v| v.get("wire_api"))
             .and_then(|v| v.as_str());
         assert_eq!(wire_api, Some("responses"));
+    }
+
+    #[test]
+    fn sync_custom_provider_display_name_rewrites_copied_toml_name() {
+        let input = r#"model_provider = "custom"
+model = "gpt-5.6-luna"
+
+[model_providers.custom]
+name = "ccode-luna"
+base_url = "https://new.sharedchat.cc/codex"
+wire_api = "responses"
+"#;
+        let result = sync_codex_custom_provider_display_name(input, "free");
+        let parsed: toml::Value = toml::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["model_providers"]["custom"]["name"].as_str(),
+            Some("free")
+        );
+        assert_eq!(
+            parsed["model_providers"]["custom"]["base_url"].as_str(),
+            Some("https://new.sharedchat.cc/codex")
+        );
+    }
+
+    #[test]
+    fn sync_custom_provider_display_name_preserves_openai_compaction_gate() {
+        let input = r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+"#;
+        let result = sync_codex_custom_provider_display_name(input, "My Relay");
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn sync_custom_provider_display_name_skips_reserved_openai_provider() {
+        let input = "model_provider = \"openai\"\nmodel = \"gpt-5\"\n";
+        let result = sync_codex_custom_provider_display_name(input, "free");
+        assert_eq!(result, input);
     }
 
     #[test]

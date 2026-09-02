@@ -29,8 +29,8 @@ pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
     persist_aggregate_user_settings_from_live, persist_current_aggregate_user_settings_from_live,
     provider_exists_in_live_config, should_backfill_provider_from_live,
-    strip_common_config_from_live_settings, sync_current_provider_for_app_to_live,
-    write_live_with_common_config,
+    strip_common_config_from_live_settings, sync_codex_provider_display_name_in_settings,
+    sync_current_provider_for_app_to_live, write_live_with_common_config,
 };
 use usage::validate_usage_script;
 
@@ -697,6 +697,127 @@ wire_api = "responses"
                 !after.is_healthy,
                 "name-only saves must not clear a recorded circuit-open state"
             );
+
+            let saved = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("query renamed provider")
+                .expect("renamed provider should exist");
+            assert_eq!(
+                stored_custom_toml_name(&saved),
+                "New name",
+                "renaming a Cube card must rewrite Codex's TOML display name"
+            );
+        });
+    }
+    fn stored_custom_toml_name(provider: &Provider) -> String {
+        let config = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("codex config toml");
+        let parsed: toml::Value = toml::from_str(config).expect("parse stored toml");
+        parsed["model_providers"]["custom"]["name"]
+            .as_str()
+            .expect("display name")
+            .to_string()
+    }
+    fn copied_codex_settings_with_stale_name() -> Value {
+        json!({
+            "auth": { "OPENAI_API_KEY": "sk-copied" },
+            "config": r#"model_provider = "custom"
+model = "gpt-5.6-luna"
+
+[model_providers.custom]
+name = "ccode-luna"
+base_url = "https://new.sharedchat.cc/codex"
+wire_api = "responses"
+"#
+        })
+    }
+    #[test]
+    #[serial]
+    fn add_codex_provider_persists_cube_display_name_into_toml() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "copied-free".to_string(),
+                "free".to_string(),
+                copied_codex_settings_with_stale_name(),
+                None,
+            );
+
+            ProviderService::add(state, AppType::Codex, provider, false)
+                .expect("add copied provider");
+
+            let saved = state
+                .db
+                .get_provider_by_id("copied-free", AppType::Codex.as_str())
+                .expect("query added provider")
+                .expect("added provider should exist");
+            assert_eq!(saved.name, "free");
+            assert_eq!(stored_custom_toml_name(&saved), "free");
+        });
+    }
+    #[test]
+    #[serial]
+    fn update_codex_provider_heals_stale_copied_toml_display_name() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "copied-free".to_string(),
+                "free".to_string(),
+                copied_codex_settings_with_stale_name(),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed stale copied provider");
+            assert_eq!(stored_custom_toml_name(&provider), "ccode-luna");
+
+            ProviderService::update(state, AppType::Codex, None, provider.clone())
+                .expect("save copied provider");
+
+            let saved = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("query healed provider")
+                .expect("healed provider should exist");
+            assert_eq!(stored_custom_toml_name(&saved), "free");
+        });
+    }
+    #[test]
+    #[serial]
+    fn update_codex_provider_preserves_openai_compaction_display_name() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "relay".to_string(),
+                "My Relay".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-relay" },
+                    "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed compaction provider");
+
+            ProviderService::update(state, AppType::Codex, None, provider.clone())
+                .expect("save compaction provider");
+
+            let saved = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("query compaction provider")
+                .expect("compaction provider should exist");
+            assert_eq!(stored_custom_toml_name(&saved), "OpenAI");
         });
     }
     #[test]
@@ -1415,6 +1536,9 @@ impl ProviderService {
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
+        if matches!(app_type, AppType::Codex) {
+            sync_codex_provider_display_name_in_settings(&mut provider);
+        }
         if app_type.is_additive_mode() {
             Self::set_provider_live_config_managed(&mut provider, add_to_live);
         }
@@ -1457,6 +1581,9 @@ impl ProviderService {
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
+        if matches!(app_type, AppType::Codex) {
+            sync_codex_provider_display_name_in_settings(&mut provider);
+        }
 
         if provider_id_changed {
             // Codex 不支持修改 provider key（id 由前端生成，改名会导致引用丢失）。
@@ -2765,7 +2892,22 @@ impl ProviderService {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderSortUpdate {
     pub id: String,
     pub sort_index: usize,
+}
+
+#[cfg(test)]
+mod provider_sort_update_serde_tests {
+    use super::ProviderSortUpdate;
+
+    #[test]
+    fn deserializes_camel_case_payload_from_frontend() {
+        let parsed: Vec<ProviderSortUpdate> =
+            serde_json::from_str(r#"[{"id":"abc","sortIndex":3}]"#)
+                .expect("frontend sends camelCase sortIndex");
+        assert_eq!(parsed[0].id, "abc");
+        assert_eq!(parsed[0].sort_index, 3);
+    }
 }

@@ -55,16 +55,10 @@ jobs:
           tagName: __VERSION__
           releaseName: __VERSION__
           releaseBody: |
-            1.0.2
+            1.0.3
 
-            - Keep aggregate default model and reasoning effort independent from Codex session and member provider live settings
-            - Auto-repair aggregate default model when its member provider is deleted, preserving user reasoning effort
-            - Keep the aggregate provider default model when Codex Desktop switches models in a session
-            - Explain OpenCode Go HTTP 403 `{"model":"..."}` as a provider entitlement, not a local /responses mismatch
-            - Fill OpenCode Go and aggregate context windows from Cube provider presets when `/v1/models` omits them, matching ordinary existing-config providers
-            - Built-in context windows for OpenCode Go `/v1/models` ids including MiniMax M3/M2.x, GLM-5.3, Qwen 3.x, and Kimi K2.6
-            - Keep a hand-edited context window when fetching or saving aggregate and catalog models
-            - Read `context_length` / `max_model_len` / `max_input_tokens` aliases from `/v1/models`
+            - After copying or renaming a supplier, rewrite Codex `[model_providers].name` so Desktop's header matches the Cube card (leave `name = "OpenAI"` compaction gates untouched)
+            - Persist drag-to-reorder of suppliers (`sortIndex` camelCase)
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

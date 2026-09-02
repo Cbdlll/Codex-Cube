@@ -32,6 +32,7 @@ import {
   setCodexWireApi,
   extractCodexModelName,
   setCodexModelName as setCodexModelNameInConfig,
+  setCodexProviderDisplayName,
 } from "@/utils/providerConfigUtils";
 import { isNonNegativeDecimalString } from "@/types/usage";
 import { getCodexCustomTemplate } from "@/config/codexTemplates";
@@ -697,6 +698,12 @@ function ProviderFormFull({
         normalizedCodexConfig = setCodexModelNameInConfig(
           normalizedCodexConfig,
           normalizedCatalogModels[0].model,
+        );
+      }
+      if (category !== "official") {
+        normalizedCodexConfig = setCodexProviderDisplayName(
+          normalizedCodexConfig,
+          values.name.trim(),
         );
       }
       const configObj = {

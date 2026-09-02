@@ -1103,6 +1103,20 @@ export const setCodexRemoteCompaction = (
   return targetSectionRange ? finalizeTomlText(lines) : normalizedText;
 };
 
+// Keep `[model_providers.<active>].name` aligned with the Cube supplier name so
+// Codex Desktop's header matches the provider card after copy/rename. Remote
+// compaction (`name = "OpenAI"`) is left untouched.
+export const setCodexProviderDisplayName = (
+  configText: string,
+  displayName: string,
+): string => {
+  const trimmed = displayName.trim();
+  if (!trimmed || isCodexRemoteCompactionEnabled(configText)) {
+    return configText;
+  }
+  return setCodexRemoteCompaction(configText, false, trimmed);
+};
+
 // 从 Codex 的 TOML 配置文本中提取 base_url（支持单/双引号）
 export const extractCodexBaseUrl = (
   configText: string | undefined | null,

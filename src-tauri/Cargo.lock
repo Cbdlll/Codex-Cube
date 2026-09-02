@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "codex-cube"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "arboard",

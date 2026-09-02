@@ -10,6 +10,7 @@ import {
   resolveCodexWireApi,
   setCodexModelName,
   setCodexRemoteCompaction,
+  setCodexProviderDisplayName,
   updateCommonConfigSnippet,
 } from "./providerConfigUtils";
 
@@ -190,6 +191,34 @@ model = "gpt-5"
 
     expect(setCodexRemoteCompaction(input, true, "OpenAI")).toBe(input);
     expect(isCodexRemoteCompactionEnabled(input)).toBe(false);
+  });
+});
+
+describe("Codex provider display name helpers", () => {
+  it("rewrites a copied provider's TOML name to the Cube supplier name", () => {
+    const input = `model_provider = "custom"
+model = "gpt-5.6-luna"
+
+[model_providers.custom]
+name = "ccode-luna"
+base_url = "https://new.sharedchat.cc/codex"
+wire_api = "responses"
+`;
+    const result = setCodexProviderDisplayName(input, "free");
+    expect(result).toContain(`name = "free"`);
+    expect(result).not.toContain(`name = "ccode-luna"`);
+    expect(result).toContain(`base_url = "https://new.sharedchat.cc/codex"`);
+  });
+
+  it("does not rewrite remote-compaction OpenAI display names", () => {
+    const input = `model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+`;
+    expect(setCodexProviderDisplayName(input, "My Relay")).toBe(input);
   });
 });
 

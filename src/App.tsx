@@ -34,6 +34,7 @@ import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import { deepClone } from "@/utils/deepClone";
+import { setCodexProviderDisplayName } from "@/utils/providerConfigUtils";
 import { cn } from "@/lib/utils";
 import {
   isWindows,
@@ -338,13 +339,24 @@ function App() {
   const handleDuplicateProvider = async (provider: Provider) => {
     const newSortIndex =
       provider.sortIndex !== undefined ? provider.sortIndex + 1 : undefined;
+    const newName = `${provider.name} copy`;
+    const settingsConfig = deepClone(provider.settingsConfig) as Record<
+      string,
+      unknown
+    >;
+    if (typeof settingsConfig.config === "string") {
+      settingsConfig.config = setCodexProviderDisplayName(
+        settingsConfig.config,
+        newName,
+      );
+    }
 
     const duplicatedProvider: Omit<Provider, "id" | "createdAt"> & {
       providerKey?: string;
       addToLive?: boolean;
     } = {
-      name: `${provider.name} copy`,
-      settingsConfig: deepClone(provider.settingsConfig),
+      name: newName,
+      settingsConfig,
       websiteUrl: provider.websiteUrl,
       category: provider.category,
       sortIndex: newSortIndex, // 复制原 sortIndex + 1
