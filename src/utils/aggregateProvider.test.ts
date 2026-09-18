@@ -160,14 +160,14 @@ describe("aggregateProvider", () => {
       (m) => m.providerId === "kimi" && m.upstreamModel === "deepseek-chat",
     );
     expect(deepseekChat?.model).toBe("deepseek-chat@deepseek");
-    expect(deepseekChat?.displayName).toBe("deepseek-chat (DeepSeek)");
+    expect(deepseekChat?.displayName).toBe("deepseek-chat [DeepSeek]");
     expect(kimiChat?.model).toBe("deepseek-chat@kimi");
-    expect(kimiChat?.displayName).toBe("deepseek-chat (Kimi)");
+    expect(kimiChat?.displayName).toBe("deepseek-chat [Kimi]");
 
     // 唯一模型槽位名保持原名，展示名同样标注供应商
     const unique = models.find((m) => m.upstreamModel === "deepseek-reasoner");
     expect(unique?.model).toBe("deepseek-reasoner");
-    expect(unique?.displayName).toBe("deepseek-reasoner (DeepSeek)");
+    expect(unique?.displayName).toBe("deepseek-reasoner [DeepSeek]");
   });
 
   it("normalizes models for save (trim/dedupe/invalid drop)", () => {

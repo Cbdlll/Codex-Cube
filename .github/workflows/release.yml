@@ -66,7 +66,7 @@ jobs:
             - `settings.json` and env-var backups now follow the custom app data directory override, so all Codex Cube files stay under one isolated directory (`~/.codex-cube` by default, cc-switch uses `~/.cc-switch`)
             - READMEs gain a "Coexisting with cc-switch" section (separate data dirs, separate ports, shared live `~/.codex`: do not enable takeover in both apps at once)
             - Import cc-switch SQL exports: the SQL import detects the `-- CC Switch SQLite 导出` header and merges Codex providers (+ custom endpoints), MCP servers, Codex prompts and model pricing. Official seeds are skipped, same-id providers are overwritten, the exported current provider is restored, and a full backup is taken before merging
-            - Aggregate models always show the provider in `displayName` (`model (Provider)`), even when the model name is unique; slot names stay unchanged unless there is a collision
+            - Aggregate models always show the provider in `displayName` (`model [Provider]`), even when the model name is unique; slot names stay unchanged unless there is a collision
             - OpenCode Go usage: quota query for `opencode.ai/zen/go` (`/zen/go` and `/zen/go/v1`) via `GET /zen/go/v1/usage`, showing rolling / weekly / monthly windows. 401 means the key is invalid; 403 means the key is valid but the workspace has no Go subscription
 
             与 cc-switch 共存（双开不再冲突）：
@@ -76,7 +76,7 @@ jobs:
             - `settings.json` 与环境变量备份跟随自定义应用数据目录，所有文件保持在同一隔离目录下（默认 `~/.codex-cube`，cc-switch 用 `~/.cc-switch`）
             - README 新增"与 cc-switch 共存"说明（目录隔离、端口隔离、live `~/.codex` 共享：不要两边同时开接管）
             - 支持导入 cc-switch 导出的 SQL：按 `-- CC Switch SQLite 导出` 文件头识别，合并 Codex 供应商（含自定义端点）、MCP、Codex 提示词与模型定价；跳过官方种子、同 id 覆盖、还原导出时的当前供应商，合并前自动整库备份
-            - 聚合模型展示名一律标注供应商（`模型 (供应商)`），唯一模型也不例外；槽位名无冲突时保持不变
+            - 聚合模型展示名一律标注供应商（`模型 [供应商]`），唯一模型也不例外；槽位名无冲突时保持不变
             - OpenCode Go 用量：支持 `opencode.ai/zen/go`（`/zen/go` 与 `/zen/go/v1`），经 `GET /zen/go/v1/usage` 展示 rolling / weekly / monthly 三窗口；401 为 key 无效，403 为 key 有效但该 workspace 无 Go 订阅
           # Stay draft until every platform has uploaded: otherwise the
           # first finished job (usually Windows) publishes a release page

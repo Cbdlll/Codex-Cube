@@ -1537,10 +1537,7 @@ export function AggregateProviderWizard({
                   <SelectContent>
                     {defaultModelOptions.map((model) => (
                       <SelectItem key={model.model} value={model.model}>
-                        {model.displayName &&
-                        model.displayName !== model.model
-                          ? `${model.displayName} (${model.model})`
-                          : model.model}
+                        {model.displayName?.trim() || model.model}
                       </SelectItem>
                     ))}
                   </SelectContent>

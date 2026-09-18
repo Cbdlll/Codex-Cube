@@ -313,7 +313,7 @@ export function buildAggregateModels(
         model: slug,
         // 展示名一律标注供应商（含唯一模型），方便在模型下拉中辨认来源；
         // 槽位名（model）仅冲突时加后缀，保持已有线程引用稳定。
-        displayName: `${model} (${provider.name.trim() || provider.id})`,
+        displayName: `${model} [${provider.name.trim() || provider.id}]`,
         providerId: provider.id,
         upstreamModel: model,
       });
