@@ -141,7 +141,7 @@ describe("aggregateProvider", () => {
     expect(getAggregateModelApiFormat(chatProvider)).toBe("openai_chat");
   });
 
-  it("renames colliding models with provider names and keeps unique slugs", () => {
+  it("renames colliding models with provider names and always labels displayName", () => {
     const deepseek = makeProvider("deepseek", "DeepSeek", {});
     const kimi = makeProvider("kimi", "Kimi", {});
     const models = buildAggregateModels([
@@ -164,10 +164,10 @@ describe("aggregateProvider", () => {
     expect(kimiChat?.model).toBe("deepseek-chat@kimi");
     expect(kimiChat?.displayName).toBe("deepseek-chat (Kimi)");
 
-    // 唯一模型保持原名
+    // 唯一模型槽位名保持原名，展示名同样标注供应商
     const unique = models.find((m) => m.upstreamModel === "deepseek-reasoner");
     expect(unique?.model).toBe("deepseek-reasoner");
-    expect(unique?.displayName).toBe("deepseek-reasoner");
+    expect(unique?.displayName).toBe("deepseek-reasoner (DeepSeek)");
   });
 
   it("normalizes models for save (trim/dedupe/invalid drop)", () => {

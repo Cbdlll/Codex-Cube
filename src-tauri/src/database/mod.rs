@@ -14,6 +14,7 @@
 //! ├── mod.rs        - Database 结构体 + 初始化
 //! ├── schema.rs     - 表结构定义 + Schema 迁移
 //! ├── backup.rs     - SQL 导入导出 + 快照备份
+//! ├── cc_switch.rs  - cc-switch 导出文件合并导入
 //! ├── migration.rs  - JSON → SQLite 数据迁移
 //! └── dao/          - 数据访问对象
 //!     ├── providers.rs
@@ -24,6 +25,7 @@
 //! ```
 
 pub(crate) mod backup;
+pub(crate) mod cc_switch;
 mod dao;
 mod migration;
 mod schema;

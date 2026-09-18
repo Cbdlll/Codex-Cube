@@ -68,6 +68,7 @@ Codex users often keep multiple ChatGPT subscriptions, third-party API providers
 
 - Separate app data: Codex Cube uses `~/.codex-cube`, cc-switch uses `~/.cc-switch` - neither touches the other's database, settings, backups, or logs
 - One-click imports: Codex Cube does not handle `ccswitch://` links at all - they are left entirely to cc-switch
+- cc-switch migration: the SQL import accepts cc-switch exports and merges Codex providers, MCP servers, Codex prompts and model pricing (official seeds skipped, current provider restored)
 - Separate default proxy ports: Codex Cube listens on `127.0.0.1:15921` for new installs, cc-switch on `127.0.0.1:15721`, so both local proxies can run at the same time
 - Shared live config: both apps manage the same `~/.codex` (Codex CLI reads only that directory), so do not enable provider takeover in both apps simultaneously - the second takeover will overwrite the first
 

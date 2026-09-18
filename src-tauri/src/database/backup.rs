@@ -49,7 +49,7 @@ const IMPORT_ALLOWED_PRAGMAS: &[&str] = &["foreign_keys", "user_version"];
 /// - 文件后端的虚拟表模块（`csvfile`、`zipfile` 等）能读写任意路径 → 拒 vtable
 /// - `Unknown` 是 rusqlite 对未识别动作码的兜底 → 未知即拒，将来 SQLite 新增的
 ///   跨文件语句会默认落进这里，不依赖有人记得回来补名单
-fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization {
+pub(crate) fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization {
     use rusqlite::hooks::{AuthAction, Authorization};
 
     let escapes_temp_db = match context.action {
@@ -147,6 +147,23 @@ impl Database {
         self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES)
     }
 
+    /// 确认外部 SQL 执行完毕后没有留下未提交的事务。
+    ///
+    /// 从 cc-switch 迁移：文件在 `COMMIT` 之前被截断时 `execute_batch` 可能
+    /// 返回成功但事务仍挂起；此时必须 ROLLBACK 并报错，否则后续的建表/迁移
+    /// 会把残缺文件伪装成合法库。
+    pub(crate) fn ensure_complete_transaction(conn: &Connection) -> Result<(), AppError> {
+        if !conn.is_autocommit() {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(AppError::localized(
+                "backup.sql.incomplete_transaction",
+                "SQL 备份事务未完成，文件可能已截断。",
+                "The SQL backup transaction is incomplete; the file may be truncated.",
+            ));
+        }
+        Ok(())
+    }
+
     fn import_sql_string_inner(
         &self,
         sql_raw: &str,
@@ -182,6 +199,7 @@ impl Database {
             None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
         );
         batch_result.map_err(|e| AppError::Database(format!("执行 SQL 导入失败: {e}")))?;
+        Self::ensure_complete_transaction(&temp_conn)?;
 
         // 补齐缺失表/索引并进行基础校验
         Self::create_tables_on_conn(&temp_conn)?;

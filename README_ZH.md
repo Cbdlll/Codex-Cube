@@ -68,6 +68,7 @@ Codex 用户通常会同时使用多个 ChatGPT 订阅、第三方 API 供应商
 
 - 数据目录隔离：Codex Cube 使用 `~/.codex-cube`，cc-switch 使用 `~/.cc-switch`，双方的数据库、设置、备份、日志互不干扰
 - 一键导入归属：Codex Cube 完全不处理 `ccswitch://` 链接，一键导入只归 cc-switch
+- cc-switch 迁移：SQL 导入支持 cc-switch 导出的文件，合并 Codex 供应商、MCP、Codex 提示词与模型定价（跳过官方种子，还原当前供应商）
 - 默认代理端口隔离：Codex Cube 新安装默认监听 `127.0.0.1:15921`，cc-switch 为 `127.0.0.1:15721`，两个本地代理可同时运行
 - Live 配置共享：双方管理的都是同一份 `~/.codex`（Codex CLI 只读该目录），不要在两个应用里同时开启供应商接管，后开启的会覆盖先生效的
 

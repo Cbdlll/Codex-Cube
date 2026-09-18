@@ -108,7 +108,7 @@ export function useImportExport(
           t("settings.importSuccess", {
             defaultValue: "配置导入成功",
           }),
-          { closeButton: true },
+          { description: result.message || undefined, closeButton: true },
         );
       } else {
         console.error(

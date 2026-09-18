@@ -114,7 +114,14 @@ lto = "thin"
 opt-level = "s"
 # 使用 unwind 以便 panic hook 能捕获 backtrace（abort 会直接终止无法捕获）
 panic = "unwind"
+# macOS 27 (CLT 27, ld-2703x) + 任意 strip 都会写坏 proc-macro dylib
+#（mis-aligned LINKEDIT，dyld 拒绝加载，rustc 报 E0463）。
+# build-override 只对编译期产物（build script / proc-macro）关 strip，
+# 最终 App 产物照样 strip，无体积代价。
 strip = "symbols"
+
+[profile.release.build-override]
+strip = false
 
 [dev-dependencies]
 serial_test = "3"

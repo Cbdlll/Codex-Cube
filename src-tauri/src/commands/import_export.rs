@@ -47,12 +47,39 @@ pub async fn import_config_from_file(
     let db_for_sync = db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let path_buf = PathBuf::from(&filePath);
-        let backup_id = db.import_sql(&path_buf)?;
+        if !path_buf.exists() {
+            return Err(AppError::InvalidInput(format!(
+                "SQL 文件不存在: {}",
+                path_buf.display()
+            )));
+        }
+        let sql_raw = std::fs::read_to_string(&path_buf)
+            .map_err(|e| AppError::io(&path_buf, e))?;
+        let sql_content = sql_raw.trim_start_matches('\u{feff}');
+        // 按文件头路由：Cube 自有备份整库替换；cc-switch 导出合并 codex 供应商。
+        let (backup_id, message) = if sql_content
+            .trim_start()
+            .starts_with("-- Codex-Cube SQLite 导出")
+        {
+            let backup_id = db.import_sql(&path_buf)?;
+            (backup_id, "SQL imported successfully".to_string())
+        } else if crate::database::cc_switch::is_cc_switch_export(sql_content) {
+            let (backup_id, report) = db.import_cc_switch_sql_string(sql_content)?;
+            (backup_id, report.summary())
+        } else {
+            return Err(AppError::InvalidInput(
+                "不支持的文件格式：请选择 Codex Cube 导出的 SQL 备份或 cc-switch 导出的 SQL 文件".to_string(),
+            ));
+        };
         let warning = post_sync_warning_from_result(Ok(run_post_import_sync(db_for_sync)));
         if let Some(msg) = warning.as_ref() {
             log::warn!("[Import] post-import sync warning: {msg}");
         }
-        Ok::<_, AppError>(success_payload_with_warning(backup_id, warning))
+        let mut payload = success_payload_with_warning(backup_id, warning);
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("message".to_string(), serde_json::Value::String(message));
+        }
+        Ok::<_, AppError>(payload)
     })
     .await
     .map_err(|e| format!("导入配置失败: {e}"))?
