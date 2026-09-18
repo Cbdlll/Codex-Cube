@@ -43,7 +43,7 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             listen_address: "127.0.0.1".to_string(),
-            listen_port: 15721, // 使用较少占用的高位端口
+            listen_port: 15921, // 与 cc-switch 默认端口 15721 错开，避免双开时抢端口
             max_retries: 3,
             request_timeout: 600,
             enable_logging: true,

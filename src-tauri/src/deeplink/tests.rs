@@ -21,21 +21,17 @@ fn test_parse_deeplink_with_notes() {
 }
 
 #[test]
-fn test_parse_ccswitch_alias_scheme() {
-    // Relay stations generate ccswitch:// one-click import links; Codex Cube
-    // accepts the scheme as an alias of codexcube://.
+fn test_parse_ccswitch_scheme_rejected() {
+    // ccswitch:// one-click imports belong to cc-switch; Codex Cube must
+    // reject the scheme so it can never hijack them.
     let url = "ccswitch://v1/import?resource=provider&app=codex&name=Relay%20Station&endpoint=https%3A%2F%2Fapi.relay.example%2Fv1&apiKey=sk-relay-test";
 
-    let request = parse_deeplink_url(url).unwrap();
+    let err = parse_deeplink_url(url).unwrap_err().to_string();
 
-    assert_eq!(request.resource, "provider");
-    assert_eq!(request.app, Some("codex".to_string()));
-    assert_eq!(request.name, Some("Relay Station".to_string()));
-    assert_eq!(
-        request.endpoint,
-        Some("https://api.relay.example/v1".to_string())
+    assert!(
+        err.contains("expected 'codexcube'"),
+        "unexpected error: {err}"
     );
-    assert_eq!(request.api_key, Some("sk-relay-test".to_string()));
 }
 
 #[test]
@@ -483,3 +479,4 @@ fn test_infer_homepage_from_endpoint_without_homepage() {
         Some("https://cubence.com".to_string())
     );
 }
+

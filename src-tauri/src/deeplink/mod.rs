@@ -1,7 +1,10 @@
 //! Deep link import functionality for Codex-Cube
 //!
-//! This module implements the codexcube:// protocol (with ccswitch:// as a
-//! compatibility alias for relay-station one-click import links).
+//! This module implements the codexcube:// protocol.
+//!
+//! NOTE: `ccswitch://` one-click imports are intentionally NOT supported to
+//! avoid conflicting with / hijacking cc-switch. Add providers manually in
+//! Codex Cube, or import via a copy-paste script / config text.
 //! via deep links. Supports importing:
 //! - Provider configurations
 //!
@@ -21,7 +24,7 @@ pub use provider::{import_provider_from_deeplink, parse_and_merge_config};
 
 /// Deep link import request model
 ///
-/// Represents a parsed codexcube:// / ccswitch:// URL ready for processing.
+/// Represents a parsed codexcube:// URL ready for processing.
 /// This struct contains all possible fields for all resource types.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

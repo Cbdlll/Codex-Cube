@@ -67,8 +67,8 @@ fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
 
 /// Get backup directory path
 fn get_backup_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
-    Ok(home.join(".codex-cube").join("backups"))
+    // 走应用配置目录（支持自定义覆盖），与 cc-switch 的备份目录隔离。
+    Ok(crate::config::get_app_config_dir().join("backups"))
 }
 
 /// Delete a single environment variable

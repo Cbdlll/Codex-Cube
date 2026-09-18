@@ -55,11 +55,21 @@ jobs:
           tagName: __VERSION__
           releaseName: __VERSION__
           releaseBody: |
-            1.0.3
+            1.0.4
 
-            - After copying or renaming a supplier, rewrite Codex `[model_providers].name` so Desktop's header matches the Cube card (leave `name = "OpenAI"` compaction gates untouched)
-            - Persist drag-to-reorder of suppliers (`sortIndex` camelCase)
-            - Keep a supplier's list position when editing it (ordinary or aggregate) instead of moving it to the end
+            Coexist with cc-switch (no more conflicts when both apps are installed):
+
+            - Drop `ccswitch://` support entirely: no OS scheme registration, the parser rejects it. One-click import links belong to cc-switch; in Codex Cube add providers manually from the 60+ presets or import via a copy-paste script/config text
+            - Default local proxy port `15721` -> `15921` for new installs (cc-switch uses `15721`), so both proxies can run at the same time. Existing installs keep their stored port
+            - `settings.json` and env-var backups now follow the custom app data directory override, so all Codex Cube files stay under one isolated directory (`~/.codex-cube` by default, cc-switch uses `~/.cc-switch`)
+            - READMEs gain a "Coexisting with cc-switch" section (separate data dirs, separate ports, shared live `~/.codex`: do not enable takeover in both apps at once)
+
+            与 cc-switch 共存（双开不再冲突）：
+
+            - 彻底去掉 `ccswitch://` 支持：不注册系统 scheme、解析器直接拒绝。一键导入归 cc-switch；Codex Cube 内从 60+ 预设手动添加，或通过复制脚本/配置文本导入
+            - 新安装默认本地代理端口 `15721` -> `15921`（cc-switch 用 `15721`），两个代理可同时运行；已安装的不动已存端口
+            - `settings.json` 与环境变量备份跟随自定义应用数据目录，所有文件保持在同一隔离目录下（默认 `~/.codex-cube`，cc-switch 用 `~/.cc-switch`）
+            - README 新增"与 cc-switch 共存"说明（目录隔离、端口隔离、live `~/.codex` 共享：不要两边同时开接管）
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

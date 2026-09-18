@@ -237,12 +237,10 @@ impl Default for AppSettings {
 
 impl AppSettings {
     fn settings_path() -> Option<PathBuf> {
-        // settings.json 保留用于旧版本迁移和无数据库场景
-        Some(
-            crate::config::get_home_dir()
-                .join(".codex-cube")
-                .join("settings.json"),
-        )
+        // settings.json 保留用于旧版本迁移和无数据库场景。
+        // 走 get_app_config_dir() 而非写死 ~/.codex-cube，使自定义应用目录
+        // 的用户所有配置文件都在同一隔离目录下（也与 cc-switch 的目录隔离）。
+        Some(crate::config::get_app_config_dir().join("settings.json"))
     }
 
     fn normalize_paths(&mut self) {

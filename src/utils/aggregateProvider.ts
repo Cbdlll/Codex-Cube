@@ -456,7 +456,7 @@ export function buildAggregateConfigTomlPreview(
   name: string,
   models: AggregateProviderModel[],
   defaultModel = "",
-  proxyBaseUrl = "http://127.0.0.1:15721/v1",
+  proxyBaseUrl = "http://127.0.0.1:15921/v1",
   defaultReasoningEffort = "",
 ): string {
   const resolvedDefault =

@@ -198,18 +198,21 @@ fn runtime_log_level_allows(level: log::Level, max_level: log::LevelFilter) -> b
     max_level.to_level().is_some_and(|maximum| level <= maximum)
 }
 
-/// 统一处理 codexcube:// / ccswitch:// 深链接 URL
+/// 统一处理 codexcube:// 深链接 URL
 ///
 /// - 解析 URL
 /// - 向前端发射 `deeplink-import` / `deeplink-error` 事件
 /// - 可选：在成功时聚焦主窗口
+///
+/// NOTE: `ccswitch://` 已不再支持（避免与 cc-switch 冲突/抢占），
+/// 收到该 scheme 直接忽略，交由 cc-switch 处理。
 fn handle_deeplink_url(
     app: &tauri::AppHandle,
     url_str: &str,
     focus_main_window: bool,
     source: &str,
 ) -> bool {
-    if !(url_str.starts_with("codexcube://") || url_str.starts_with("ccswitch://")) {
+    if !url_str.starts_with("codexcube://") {
         return false;
     }
 
@@ -1334,7 +1337,8 @@ pub fn run() {
                         }
                     }
                 }
-                // 处理通过自定义 URL 协议触发的打开事件（codexcube:// 或 ccswitch://）
+                // 处理通过自定义 URL 协议触发的打开事件（仅 codexcube://；
+                // ccswitch:// 已不再支持，交由 cc-switch 处理）
                 RunEvent::Opened { urls } => {
                     if let Some(url) = urls.first() {
                         let url_str = url.to_string();
@@ -1343,9 +1347,7 @@ pub fn run() {
                             url_for_log(&url_str)
                         );
 
-                        if url_str.starts_with("codexcube://")
-                            || url_str.starts_with("ccswitch://")
-                        {
+                        if url_str.starts_with("codexcube://") {
                             if crate::lightweight::is_lightweight_mode() {
                                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
                                 {

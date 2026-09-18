@@ -86,7 +86,7 @@ impl Database {
                 Ok(GlobalProxyConfig {
                     proxy_enabled: false,
                     listen_address: "127.0.0.1".to_string(),
-                    listen_port: 15721,
+                    listen_port: 15921,
                     enable_logging: true,
                 })
             }

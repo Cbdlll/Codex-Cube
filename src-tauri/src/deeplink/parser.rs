@@ -1,8 +1,7 @@
 //! Deep link URL parser
 //!
-//! Parses codexcube:// and ccswitch:// URLs into DeepLinkImportRequest
-//! structures. The ccswitch:// scheme is accepted as an alias so one-click
-//! import links from relay stations keep working in Codex Cube.
+//! Parses codexcube:// URLs into DeepLinkImportRequest structures.
+//! The ccswitch:// scheme is rejected: one-click imports belong to cc-switch.
 
 use super::utils::validate_url;
 use super::DeepLinkImportRequest;
@@ -10,21 +9,22 @@ use crate::error::AppError;
 use std::collections::HashMap;
 use url::Url;
 
-/// Parse a codexcube:// or ccswitch:// URL into a DeepLinkImportRequest.
+/// Parse a codexcube:// URL into a DeepLinkImportRequest.
 ///
 /// Expected format:
-/// codexcube://v1/import?resource={type}&... (also accepts ccswitch://)
+/// codexcube://v1/import?resource={type}&...
 pub fn parse_deeplink_url(url_str: &str) -> Result<DeepLinkImportRequest, AppError> {
     // Parse URL
     let url = Url::parse(url_str)
         .map_err(|e| AppError::InvalidInput(format!("Invalid deep link URL: {e}")))?;
 
-    // Validate scheme: ccswitch:// is an alias kept for relay-station
-    // one-click import compatibility.
+    // Only codexcube:// is accepted. ccswitch:// belongs to cc-switch;
+    // rejecting it here (and not registering it at OS level) guarantees
+    // Codex Cube can never hijack cc-switch one-click imports.
     let scheme = url.scheme();
-    if !matches!(scheme, "codexcube" | "ccswitch") {
+    if !matches!(scheme, "codexcube") {
         return Err(AppError::InvalidInput(format!(
-            "Invalid scheme: expected 'codexcube' or 'ccswitch', got '{scheme}'"
+            "Invalid scheme: expected 'codexcube', got '{scheme}'"
         )));
     }
 
