@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="#111111">
+  <!-- App icon master. Regenerate the platform icon set with:
+       pnpm tauri icon src-tauri/icons/icon-source.svg
+       icon-on-dark.svg is this geometry with a white fill, for the README logo. -->
+  <!-- main slash: pointed ends, 40px belly -->
+  <path d="M88 140 C230 150 340 260 424 388 C310 280 190 210 88 140 Z"/>
+  <!-- secondary flying stroke -->
+  <path d="M92 372 C150 366 210 344 272 302 C204 318 142 340 92 372 Z"/>
+  <!-- seal dot -->
+  <circle cx="372" cy="132" r="14"/>
+</svg>
