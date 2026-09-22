@@ -362,6 +362,23 @@ impl RequestContext {
                 &request_model,
             )
             .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
+            // 熔断成员优先：成员熔断器已 Open（近期连续失败，如上游无渠道/鉴权
+            // 失效）时直接拒收，不再向坏上游转发。客户端对 503 会自动重试约
+            // 30 次，透传只会把一次配置问题放大成 30 条失败记录；503 本身不
+            // 可重试（换不换 provider 都一样坏），且熔断器本来就只由真实流量
+            // 驱动，这里只是让它生效。
+            if let Some(ref member) = member {
+                let permit = state
+                    .provider_router
+                    .allow_provider_request(&member.id, app_type_str)
+                    .await;
+                if !permit.allowed {
+                    return Err(ProxyError::ProviderUnhealthy(format!(
+                        "供应商 `{}` 暂不可用（近期失败过多，已熔断），请稍后重试或检查上游渠道/鉴权",
+                        member.name
+                    )));
+                }
+            }
             match member {
                 Some(member) => {
                     log::info!(
@@ -880,6 +897,70 @@ mod tests {
                 assert!(message.contains("未配置模型 `gpt-5.5`"), "{message}");
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn aggregate_member_with_open_circuit_is_rejected_before_forward() {
+        let _home = TempHome::new();
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+
+        let member = Provider::with_id(
+            "bad-member".to_string(),
+            "Bad Member".to_string(),
+            serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "sk-bad" },
+                "config": "base_url = \"https://example.invalid/v1\"\nwire_api = \"responses\"",
+                "model": "bad-model"
+            }),
+            None,
+        );
+        db.save_provider("codex", &member).expect("save member");
+
+        let mut aggregate = Provider::with_id(
+            "agg-test".to_string(),
+            "My Aggregate".to_string(),
+            serde_json::json!({
+                "auth": {},
+                "config": "",
+                "aggregateModels": [{
+                    "model": "bad-model",
+                    "providerId": "bad-member",
+                    "upstreamModel": "bad-model"
+                }]
+            }),
+            None,
+        );
+        aggregate.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("aggregate".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &aggregate)
+            .expect("save aggregate");
+        db.set_current_provider("codex", "agg-test")
+            .expect("set current provider");
+
+        let state = build_state(db.clone());
+        // 连续失败打满熔断阈值（默认 4 次），成员熔断器 Open。
+        for _ in 0..10 {
+            state
+                .provider_router
+                .record_result("bad-member", "codex", false, false, Some("boom".to_string()))
+                .await
+                .expect("record failure");
+        }
+
+        let body = serde_json::json!({ "model": "bad-model", "input": "hi" });
+        let headers = axum::http::HeaderMap::new();
+        let result =
+            RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await;
+        let err = result.err().expect("open-circuit member must be rejected");
+        match err {
+            ProxyError::ProviderUnhealthy(message) => {
+                assert!(message.contains("Bad Member"), "{message}");
+            }
+            other => panic!("expected ProviderUnhealthy, got {other:?}"),
         }
     }
 
