@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="#ffffff">
+  <!-- README logo variant for dark backgrounds. Same geometry as codex-cube-icon-ink.svg
+       (which produces icon.png); only the fill is inverted so the mark stays visible
+       on GitHub's dark theme. Not an app icon: not referenced by tauri.conf.json. -->
+  <path d="M88 140 C230 150 340 260 424 388 C310 280 190 210 88 140 Z"/>
+  <path d="M92 372 C150 366 210 344 272 302 C204 318 142 340 92 372 Z"/>
+  <circle cx="372" cy="132" r="14"/>
+</svg>

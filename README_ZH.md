@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="src-tauri/icons/icon.png" width="96" alt="Codex Cube" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="src-tauri/icons/icon-on-dark.svg" />
+  <img src="src-tauri/icons/icon.png" width="96" alt="Codex Cube" />
+</picture>
 
 # Codex Cube
 
