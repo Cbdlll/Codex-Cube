@@ -134,7 +134,7 @@ export function ProviderActions({
   const canDelete = !isCurrent;
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex flex-shrink-0 items-center gap-1.5 overflow-x-auto">
       {/* wrapper span 承接 hover：disabled 按钮自身 pointer-events:none，
           原生 title 与 cursor 都必须挂在未禁用的外层元素上才会生效 */}
       <span
@@ -156,7 +156,7 @@ export function ProviderActions({
         </Button>
       </span>
 
-      <div className="flex items-center gap-1">
+      <div className="flex flex-shrink-0 items-center gap-1">
         <Button
           size="icon"
           variant="ghost"

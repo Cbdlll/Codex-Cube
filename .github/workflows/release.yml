@@ -54,8 +54,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: __VERSION__
-          releaseName: __VERSION__
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
           # Draft placeholder only: the real notes are attached by the
           # publish-release job from the tagged release commit message,
           # so no per-version text needs to be kept in sync here.

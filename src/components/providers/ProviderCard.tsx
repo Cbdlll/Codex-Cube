@@ -368,8 +368,8 @@ export function ProviderCard({
             </div>
           </div>
 
-          <div className="flex items-center ml-auto min-w-0 gap-3">
-            <div className="ml-auto">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-x-3 gap-y-2 sm:flex-none">
+            <div className="min-w-0">
               <div className="flex items-center gap-1">
                 {isCodexOauth ? (
                   <CodexOauthQuotaFooter
