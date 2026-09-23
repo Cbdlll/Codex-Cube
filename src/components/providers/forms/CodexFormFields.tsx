@@ -26,7 +26,12 @@ import {
   Trash2,
 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
-import { ApiKeySection, EndpointField, ModelDropdown } from "./shared";
+import {
+  ApiKeySection,
+  EndpointField,
+  ModelDropdown,
+  ModelReasoningEditor,
+} from "./shared";
 import { XaiOAuthSection } from "./XaiOAuthSection";
 import {
   fetchModelsForConfig,
@@ -130,6 +135,16 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
     model,
     displayName: seed?.displayName ?? "",
     contextWindow: resolvedWindow,
+    // Per-model reasoning subset + default (user-editable below).
+    ...((seed?.reasoningEfforts ?? seed?.reasoning_efforts)
+      ? { reasoningEfforts: seed.reasoningEfforts ?? seed.reasoning_efforts }
+      : {}),
+    ...((seed?.defaultReasoningEffort ?? seed?.default_reasoning_effort)
+      ? {
+          defaultReasoningEffort:
+            seed.defaultReasoningEffort ?? seed.default_reasoning_effort,
+        }
+      : {}),
     // Carry native-profile overrides verbatim (not user-editable in the row UI,
     // but must survive load->save so the official catalog fidelity is kept).
     ...(seed?.supportsParallelToolCalls !== undefined
@@ -172,7 +187,15 @@ function catalogRowsMatchModels(
         (incoming.supportsParallelToolCalls ?? null) &&
       (row.baseInstructions ?? "") === (incoming.baseInstructions ?? "") &&
       JSON.stringify(row.inputModalities ?? []) ===
-        JSON.stringify(incoming.inputModalities ?? [])
+        JSON.stringify(incoming.inputModalities ?? []) &&
+      JSON.stringify(row.reasoningEfforts ?? row.reasoning_efforts ?? []) ===
+        JSON.stringify(
+          incoming.reasoningEfforts ?? incoming.reasoning_efforts ?? [],
+        ) &&
+      (row.defaultReasoningEffort ?? row.default_reasoning_effort ?? "") ===
+        (incoming.defaultReasoningEffort ??
+          incoming.default_reasoning_effort ??
+          "")
     );
   });
 }
@@ -994,7 +1017,7 @@ export function CodexFormFields({
                 {catalogRows.length > 0 && (
                   <div className="space-y-2">
                     {/* 列头：md+ 显示 */}
-                    <div className="hidden grid-cols-[1fr_1fr_140px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+                    <div className="hidden grid-cols-[1fr_1fr_140px_150px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                       <span>
                         {t("codexConfig.catalogColumnDisplay", {
                           defaultValue: "菜单显示名",
@@ -1010,13 +1033,18 @@ export function CodexFormFields({
                           defaultValue: "上下文窗口",
                         })}
                       </span>
+                      <span>
+                        {t("codexConfig.catalogColumnReasoning", {
+                          defaultValue: "思考档位",
+                        })}
+                      </span>
                       <span />
                     </div>
 
                     {catalogRows.map((row, index) => (
                       <div
                         key={row.rowId}
-                        className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_140px_36px]"
+                        className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_140px_150px_36px]"
                       >
                         <Input
                           value={row.displayName ?? ""}
@@ -1085,6 +1113,22 @@ export function CodexFormFields({
                           aria-label={t("codexConfig.catalogColumnContext", {
                             defaultValue: "上下文窗口",
                           })}
+                        />
+                        <ModelReasoningEditor
+                          value={{
+                            reasoningEfforts:
+                              row.reasoningEfforts ?? row.reasoning_efforts,
+                            defaultReasoningEffort:
+                              row.defaultReasoningEffort ??
+                              row.default_reasoning_effort,
+                          }}
+                          onChange={(next) =>
+                            handleUpdateCatalogRow(index, {
+                              reasoningEfforts: next.reasoningEfforts,
+                              defaultReasoningEffort:
+                                next.defaultReasoningEffort,
+                            })
+                          }
                         />
                         <Button
                           type="button"

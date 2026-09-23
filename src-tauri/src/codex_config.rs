@@ -768,8 +768,53 @@ fn codex_catalog_model_entry(
         }
     }
 
+    apply_spec_reasoning_levels(entry_obj, spec);
+
     entry
 }
+
+/// Apply a per-model reasoning-level override to a generated catalog entry.
+///
+/// - `reasoning_efforts`: replaces `supported_reasoning_levels` with the
+///   user-chosen subset (order follows the canonical Desktop order).
+/// - `default_reasoning_effort`: replaces `default_reasoning_level`.
+/// - Neither set: the template/default normalization path decides.
+fn apply_spec_reasoning_levels(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    spec: &CodexCatalogModelSpec,
+) {
+    let subset = spec
+        .reasoning_efforts
+        .as_deref()
+        .filter(|items| !items.is_empty());
+    if let Some(subset) = subset {
+        let levels: Vec<Value> = DESKTOP_REASONING_EFFORTS
+            .iter()
+            .filter(|effort| subset.iter().any(|item| item.as_str() == **effort))
+            .map(|effort| {
+                json!({ "effort": effort, "description": desktop_reasoning_description(effort) })
+            })
+            .collect();
+        if !levels.is_empty() {
+            entry_obj.insert(
+                "supported_reasoning_levels".to_string(),
+                Value::Array(levels),
+            );
+            entry_obj.insert(REASONING_SUBSET_MARKER.to_string(), Value::Bool(true));
+        }
+    }
+    if let Some(default) = spec.default_reasoning_effort.as_deref() {
+        entry_obj.insert("default_reasoning_level".to_string(), json!(default));
+    }
+}
+
+/// Marker pinning a per-model reasoning subset through normalization.
+/// Inserted in memory by `apply_spec_reasoning_levels`, consumed and stripped
+/// by `normalize_codex_reasoning_levels` — never written to disk. Without it
+/// normalization cannot tell a user-chosen subset apart from a vendor's
+/// partial levels (e.g. DeepSeek official ships four), which must still
+/// expand to the full Desktop set.
+const REASONING_SUBSET_MARKER: &str = "__codex_cube_reasoning_subset";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexCatalogModelSpec {
@@ -794,6 +839,12 @@ struct CodexCatalogModelSpec {
     /// back to the template default when absent. Only consulted for
     /// `NativeResponses`.
     base_instructions: Option<String>,
+    /// Per-model reasoning levels: supported subset (None/empty = all six
+    /// Desktop levels) plus a per-model default level. Applied to every
+    /// profile's generated catalog; official vendor entries keep their own
+    /// levels unless the user set an explicit override.
+    reasoning_efforts: Option<Vec<String>>,
+    default_reasoning_effort: Option<String>,
 }
 
 fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
@@ -865,6 +916,39 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
             .filter(|text| !text.is_empty())
             .map(str::to_string);
 
+        let reasoning_efforts = model_config
+            .get("reasoningEfforts")
+            .or_else(|| model_config.get("reasoning_efforts"))
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                let mut seen = std::collections::HashSet::new();
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .map(str::trim)
+                    .filter(|effort| {
+                        !effort.is_empty()
+                            && DESKTOP_REASONING_EFFORTS.contains(effort)
+                            && seen.insert((*effort).to_string())
+                    })
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|items| !items.is_empty());
+        let default_reasoning_effort = model_config
+            .get("defaultReasoningEffort")
+            .or_else(|| model_config.get("default_reasoning_effort"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|effort| {
+                !effort.is_empty()
+                    && DESKTOP_REASONING_EFFORTS.contains(effort)
+                    && reasoning_efforts
+                        .as_ref()
+                        .is_none_or(|subset| subset.iter().any(|item| item == effort))
+            })
+            .map(str::to_string);
+
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
             display_name,
@@ -872,6 +956,8 @@ fn codex_catalog_model_specs(settings: &Value) -> Vec<CodexCatalogModelSpec> {
             supports_parallel_tool_calls,
             input_modalities,
             base_instructions,
+            reasoning_efforts,
+            default_reasoning_effort,
         });
     }
 
@@ -1354,6 +1440,8 @@ fn codex_vendor_catalog_model_entry(
     {
         entry_obj.insert("base_instructions".to_string(), json!(base_instructions));
     }
+    // Explicit per-model reasoning overrides win over the official entry too.
+    apply_spec_reasoning_levels(entry_obj, spec);
 
     // Defensive: if a future codex parser requires a field the vendor file
     // predates, backfill only whitelisted parser-required keys.
@@ -1837,6 +1925,43 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             .and_then(|v| v.as_bool())
         {
             obj.insert("supportsParallelToolCalls".to_string(), json!(parallel));
+        }
+        // Per-model reasoning levels round-trip only when they differ from the
+        // six-level default, so untouched rows stay clean and existing
+        // snapshots keep passing through unchanged.
+        if let Some(levels) = entry
+            .get("supported_reasoning_levels")
+            .and_then(|v| v.as_array())
+        {
+            let efforts: Vec<String> = levels
+                .iter()
+                .filter_map(|level| level.get("effort").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect();
+            let is_full_default = efforts.len() == DESKTOP_REASONING_EFFORTS.len()
+                && DESKTOP_REASONING_EFFORTS
+                    .iter()
+                    .all(|effort| efforts.iter().any(|item| item == effort));
+            if !efforts.is_empty() && !is_full_default {
+                obj.insert("reasoningEfforts".to_string(), json!(efforts));
+            }
+            if let Some(default) = entry
+                .get("default_reasoning_level")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|default| {
+                    !default.is_empty()
+                        && DESKTOP_REASONING_EFFORTS.contains(default)
+                        && (is_full_default || efforts.iter().any(|item| item == default))
+                })
+            {
+                // Full-default rows only keep an explicit default when it is
+                // not the global default ("high" == template default);
+                // subset rows always keep theirs (it selects within the menu).
+                if !is_full_default || default != "high" {
+                    obj.insert("defaultReasoningEffort".to_string(), json!(default));
+                }
+            }
         }
         if let Some(modalities) = entry.get("input_modalities").and_then(|v| v.as_array()) {
             let mods: Vec<String> = modalities
@@ -3403,6 +3528,10 @@ fn resolve_aggregate_default_model(
 
 /// Normalize generated `model_catalog_json` and `models_cache.json` entries to
 /// the Desktop-supported reasoning effort set.
+///
+/// Entries pinned by `REASONING_SUBSET_MARKER` (an explicit per-model subset
+/// from `apply_spec_reasoning_levels`) keep their shape; everything else
+/// expands to the full Desktop set as before.
 fn normalize_codex_reasoning_levels(models: &mut Value) {
     let Some(model_list) = models.as_array_mut() else {
         return;
@@ -3412,6 +3541,11 @@ fn normalize_codex_reasoning_levels(models: &mut Value) {
         let Some(entry) = model.as_object_mut() else {
             continue;
         };
+        // Read-then-strip the subset marker BEFORE borrowing `levels`, so the
+        // marker only lives in memory and never reaches the written catalog.
+        let subset_pinned = entry
+            .remove(REASONING_SUBSET_MARKER)
+            .is_some_and(|flag| flag.as_bool().unwrap_or(false));
         let Some(levels) = entry
             .get_mut("supported_reasoning_levels")
             .and_then(Value::as_array_mut)
@@ -3435,7 +3569,21 @@ fn normalize_codex_reasoning_levels(models: &mut Value) {
             })
             .collect();
 
-        *levels = DESKTOP_REASONING_EFFORTS
+        // Only an explicit user subset (marker from `apply_spec_reasoning_levels`)
+        // keeps its shape; anything else (template default / official vendor
+        // levels) expands to the full Desktop set as before.
+        let is_subset = subset_pinned && !existing.is_empty();
+        let ordered: Vec<&str> = if is_subset {
+            DESKTOP_REASONING_EFFORTS
+                .iter()
+                .copied()
+                .filter(|effort| existing.iter().any(|(name, _)| name == effort))
+                .collect()
+        } else {
+            DESKTOP_REASONING_EFFORTS.to_vec()
+        };
+
+        *levels = ordered
             .iter()
             .map(|effort| {
                 let description = existing
@@ -3447,15 +3595,20 @@ fn normalize_codex_reasoning_levels(models: &mut Value) {
             })
             .collect();
 
-        let default_ok = entry
+        let valid_default = entry
             .get("default_reasoning_level")
             .and_then(Value::as_str)
-            .is_some_and(|effort| DESKTOP_REASONING_EFFORTS.contains(&effort));
-        if !default_ok {
+            .filter(|effort| DESKTOP_REASONING_EFFORTS.contains(effort))
+            .filter(|effort| !is_subset || existing.iter().any(|(name, _)| name == effort));
+        if valid_default.is_none() {
+            // Prefer "high"; clamp into the subset when it is unavailable.
             let fallback = if existing.iter().any(|(name, _)| name == "high") {
                 "high"
             } else {
-                "medium"
+                existing
+                    .first()
+                    .map(|(name, _)| name.as_str())
+                    .unwrap_or("medium")
             };
             entry.insert("default_reasoning_level".to_string(), json!(fallback));
         }
@@ -4877,6 +5030,57 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
+    fn per_model_reasoning_levels_override_template_and_normalize() {
+        // Per-model subset + default must survive template expansion and
+        // normalization: the subset keeps its shape, the default stays
+        // inside it, and the in-memory marker never reaches the output.
+        let template = json!({ "slug": "gpt-5.5" });
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "kimi-k3",
+                        "displayName": "Kimi K3",
+                        "reasoningEfforts": ["low", "high", "bogus"],
+                        "defaultReasoningEffort": "low"
+                    },
+                    { "model": "gpt-5.6-sol", "displayName": "GPT" }
+                ]
+            }
+        });
+        let catalog =
+            codex_model_catalog_from_settings(&settings, "", CodexCatalogToolProfile::ProxyChat)
+                .expect("catalog")
+                .expect("non-empty");
+        let mut models = catalog["models"].clone();
+        normalize_codex_reasoning_levels(&mut models);
+        let kimi = &models[0];
+        let efforts: Vec<&str> = kimi["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect();
+        assert_eq!(efforts, vec!["low", "high"]);
+        assert_eq!(
+            kimi.get("default_reasoning_level").and_then(Value::as_str),
+            Some("low")
+        );
+        assert!(kimi.get(REASONING_SUBSET_MARKER).is_none());
+        let gpt = &models[1];
+        let gpt_efforts: Vec<&str> = gpt["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            gpt_efforts,
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+    }
+
+    #[test]
     fn proxy_chat_catalog_entries_carry_reasoning_summaries_flag() {
         // End to end: a stale dynamic template, once backfilled, must yield
         // catalog entries codex 0.144.5+ can parse.
@@ -4889,6 +5093,8 @@ base_url = "https://production.api/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning_efforts: None,
+            default_reasoning_effort: None,
         }];
         let catalog = codex_model_catalog_from_specs(
             &specs,
@@ -5310,6 +5516,8 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning_efforts: None,
+                default_reasoning_effort: None,
             },
             CodexCatalogModelSpec {
                 model: "deepseek/deepseek-v4-pro".to_string(),
@@ -5318,6 +5526,8 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning_efforts: None,
+                default_reasoning_effort: None,
             },
             CodexCatalogModelSpec {
                 model: "glm-5.2v".to_string(),
@@ -5326,6 +5536,8 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning_efforts: None,
+                default_reasoning_effort: None,
             },
             CodexCatalogModelSpec {
                 model: "deepseek-v4-flash".to_string(),
@@ -5334,6 +5546,8 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
                 base_instructions: None,
+                reasoning_efforts: None,
+                default_reasoning_effort: None,
             },
             CodexCatalogModelSpec {
                 model: "custom-text-alias".to_string(),
@@ -5342,6 +5556,8 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: Some(vec!["text".to_string()]),
                 base_instructions: None,
+                reasoning_efforts: None,
+                default_reasoning_effort: None,
             },
         ];
 
@@ -5660,6 +5876,8 @@ wire_api = "responses"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning_efforts: None,
+            default_reasoning_effort: None,
         }];
         // Using a gpt-5.5-shaped template under ProxyChat must NOT strip
         // apply_patch_tool_type. (The native template lacks it, so synthesize
@@ -6972,7 +7190,9 @@ model_reasoning_effort = "max"
             Some("glm-5.2")
         );
         assert_eq!(
-            settings.get("defaultReasoningEffort").and_then(Value::as_str),
+            settings
+                .get("defaultReasoningEffort")
+                .and_then(Value::as_str),
             Some("max"),
             "reasoning effort stays what the user configured"
         );

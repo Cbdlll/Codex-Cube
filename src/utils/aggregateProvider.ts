@@ -53,6 +53,76 @@ export function normalizeCodexReasoningEffort(
     : DEFAULT_CODEX_REASONING_EFFORT;
 }
 
+/** 归一化单模型支持档位子集：过滤非法值、去重、保序；空/非法 -> undefined（= 全部六档）。 */
+export function normalizeCodexReasoningEffortSubset(
+  value: unknown,
+): CodexReasoningEffort[] | undefined {
+  const raw = Array.isArray(value) ? value : undefined;
+  if (!raw) return undefined;
+  const seen = new Set<string>();
+  const result: CodexReasoningEffort[] = [];
+  for (const item of raw) {
+    const effort = String(item ?? "")
+      .trim()
+      .toLowerCase();
+    if (
+      (CODEX_REASONING_EFFORTS as readonly string[]).includes(effort) &&
+      !seen.has(effort)
+    ) {
+      seen.add(effort);
+      result.push(effort as CodexReasoningEffort);
+    }
+  }
+  return result.length > 0 ? result : undefined;
+}
+
+/** 一次归一化单模型推理档覆写，返回可直接展开的字段（snake_case 兼容）。
+ * 全选六档压缩为"未设置"（与默认行为等价，保持存储干净）。 */
+export function normalizedModelReasoningFields(item: {
+  reasoningEfforts?: unknown;
+  reasoning_efforts?: unknown;
+  defaultReasoningEffort?: unknown;
+  default_reasoning_effort?: unknown;
+}): Pick<
+  AggregateProviderModel,
+  "reasoningEfforts" | "defaultReasoningEffort"
+> {
+  const subset = normalizeCodexReasoningEffortSubset(
+    item.reasoningEfforts ?? item.reasoning_efforts,
+  );
+  // 全选六档压缩为"未设置"（与默认行为等价，保持存储干净）。
+  const compressed =
+    subset && subset.length < CODEX_REASONING_EFFORTS.length
+      ? subset
+      : undefined;
+  const defaultEffort = normalizeModelDefaultReasoningEffort(
+    item.defaultReasoningEffort ?? item.default_reasoning_effort,
+    subset,
+  );
+  return {
+    ...(compressed ? { reasoningEfforts: compressed } : {}),
+    // default 已保证合法且在子集内；子集被压缩时它仍落在默认全集里。
+    ...(defaultEffort ? { defaultReasoningEffort: defaultEffort } : {}),
+  };
+}
+
+/** 归一化单模型默认档：合法且在子集内才保留，否则 undefined。 */
+export function normalizeModelDefaultReasoningEffort(
+  value: unknown,
+  subset?: readonly string[],
+): CodexReasoningEffort | undefined {
+  const effort = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!(CODEX_REASONING_EFFORTS as readonly string[]).includes(effort)) {
+    return undefined;
+  }
+  if (subset && subset.length > 0 && !subset.includes(effort)) {
+    return undefined;
+  }
+  return effort as CodexReasoningEffort;
+}
+
 function reasoningEffortFromConfigToml(configText: string): string | undefined {
   const match = configText.match(
     /^\s*model_reasoning_effort\s*=\s*(?:"([^"]+)"|'([^']+)')/m,
@@ -122,6 +192,8 @@ export interface AggregateModelMeta {
   supportsParallelToolCalls?: boolean;
   inputModalities?: string[];
   baseInstructions?: string;
+  reasoningEfforts?: string[];
+  defaultReasoningEffort?: string;
 }
 
 /**
@@ -167,11 +239,20 @@ export function aggregateMetaFromCatalogEntry(
       ? entry.input_modalities
       : undefined;
   const baseInstructions = entry?.baseInstructions ?? entry?.base_instructions;
+  const reasoningEfforts = normalizeCodexReasoningEffortSubset(
+    entry?.reasoningEfforts ?? entry?.reasoning_efforts,
+  );
+  const defaultReasoningEffort = normalizeModelDefaultReasoningEffort(
+    entry?.defaultReasoningEffort ?? entry?.default_reasoning_effort,
+    reasoningEfforts,
+  );
   if (
     contextWindow === undefined &&
     supportsParallelToolCalls === undefined &&
     !inputModalities?.length &&
-    !baseInstructions?.trim()
+    !baseInstructions?.trim() &&
+    !reasoningEfforts &&
+    !defaultReasoningEffort
   ) {
     return undefined;
   }
@@ -188,6 +269,8 @@ export function aggregateMetaFromCatalogEntry(
     ...(baseInstructions?.trim()
       ? { baseInstructions: baseInstructions.trim() }
       : {}),
+    ...(reasoningEfforts ? { reasoningEfforts } : {}),
+    ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
   };
 }
 
@@ -213,6 +296,12 @@ export function applyAggregateModelMeta(
         : {}),
       ...(meta.baseInstructions?.trim()
         ? { baseInstructions: meta.baseInstructions.trim() }
+        : {}),
+      ...(meta.reasoningEfforts
+        ? { reasoningEfforts: meta.reasoningEfforts }
+        : {}),
+      ...(meta.defaultReasoningEffort
+        ? { defaultReasoningEffort: meta.defaultReasoningEffort }
         : {}),
     };
   });
@@ -370,6 +459,7 @@ export function normalizeAggregateModelsForSave(
       ...(item.baseInstructions?.trim()
         ? { baseInstructions: item.baseInstructions.trim() }
         : {}),
+      ...normalizedModelReasoningFields(item),
     });
   }
   return result;
@@ -397,6 +487,7 @@ export function buildAggregateModelCatalog(models: AggregateProviderModel[]): {
       ...(item.baseInstructions?.trim()
         ? { baseInstructions: item.baseInstructions.trim() }
         : {}),
+      ...normalizedModelReasoningFields(item),
     })),
   };
 }
@@ -540,6 +631,15 @@ export function parseAggregateSettings(settingsConfig: Record<string, any>): {
           : typeof item?.base_instructions === "string"
             ? item.base_instructions
             : undefined,
+      reasoningEfforts: normalizeCodexReasoningEffortSubset(
+        item?.reasoningEfforts ?? item?.reasoning_efforts,
+      ),
+      defaultReasoningEffort: normalizeModelDefaultReasoningEffort(
+        item?.defaultReasoningEffort ?? item?.default_reasoning_effort,
+        normalizeCodexReasoningEffortSubset(
+          item?.reasoningEfforts ?? item?.reasoning_efforts,
+        ),
+      ),
       apiFormat: normalizeCodexApiFormat(
         item?.apiFormat ?? item?.api_format ?? item?.wireApi ?? item?.wire_api,
       ),
@@ -556,7 +656,7 @@ export function parseAggregateSettings(settingsConfig: Record<string, any>): {
       : "";
   const tomlModel =
     typeof settingsConfig.config === "string"
-      ? extractCodexModelName(settingsConfig.config)?.trim() ?? ""
+      ? (extractCodexModelName(settingsConfig.config)?.trim() ?? "")
       : "";
   const defaultModel =
     storedDefaultModel ||

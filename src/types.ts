@@ -230,6 +230,13 @@ export interface CodexCatalogModel {
   // Codex requires this field in every catalog entry; when omitted the backend
   // falls back to a neutral default. e.g. MiMo "developed by Xiaomi".
   baseInstructions?: string;
+  // Per-model reasoning levels for the generated Codex model catalog.
+  // reasoningEfforts: supported subset (omit/empty = all six levels).
+  // defaultReasoningEffort: per-model default level (must be in the subset).
+  reasoningEfforts?: string[];
+  reasoning_efforts?: string[];
+  defaultReasoningEffort?: string;
+  default_reasoning_effort?: string;
 }
 
 // 聚合 Provider 的一条模型映射：对外展示给 Codex 的插槽名 -> 成员供应商 + 上游模型。
@@ -248,6 +255,10 @@ export interface AggregateProviderModel {
   supportsParallelToolCalls?: boolean;
   inputModalities?: string[];
   baseInstructions?: string;
+  reasoningEfforts?: string[];
+  reasoning_efforts?: string[];
+  defaultReasoningEffort?: string;
+  default_reasoning_effort?: string;
 }
 
 // Claude 认证字段类型

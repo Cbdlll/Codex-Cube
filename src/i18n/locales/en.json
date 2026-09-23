@@ -867,7 +867,13 @@
     "reasoningGroupTitle": "Reasoning Capability",
     "reasoningSectionHint": "Preset providers are configured automatically; custom providers are inferred from name/URL. Override manually only when auto-detection is wrong.",
     "advancedSectionHint": "Includes upstream format, model mapping, reasoning overrides and custom User-Agent. Providers using the Chat Completions protocol require routing takeover to be enabled.",
-    "noCommonConfigToApply": "The common config snippet is empty or contains nothing to write"
+    "noCommonConfigToApply": "The common config snippet is empty or contains nothing to write",
+    "catalogColumnReasoning": "Reasoning",
+    "reasoningAllLevels": "All levels",
+    "reasoningLevelsHint": "Reasoning levels offered for this model in the Codex menu; selecting all means all six levels.",
+    "reasoningDefaultLabel": "Default level",
+    "reasoningDefaultPlaceholder": "Follow global",
+    "reasoningDefaultShort": "Default {{effort}}"
   },
   "providerPreset": {
     "label": "Provider Preset",

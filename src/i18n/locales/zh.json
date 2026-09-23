@@ -871,7 +871,13 @@
     "reasoningGroupTitle": "思考能力",
     "reasoningSectionHint": "预设供应商已自动配置；自定义供应商会按名称/地址自动推断。仅当自动识别不准时才需手动覆盖。",
     "advancedSectionHint": "包含上游格式、模型映射、思考能力与自定义 User-Agent。使用 Chat Completions 协议的供应商需开启路由接管才能使用。",
-    "noCommonConfigToApply": "通用配置片段为空或没有可写入的内容"
+    "noCommonConfigToApply": "通用配置片段为空或没有可写入的内容",
+    "catalogColumnReasoning": "思考档位",
+    "reasoningAllLevels": "全部档位",
+    "reasoningLevelsHint": "该模型在 Codex 菜单中可选的思考档位；全选即全部六档。",
+    "reasoningDefaultLabel": "默认档位",
+    "reasoningDefaultPlaceholder": "随全局",
+    "reasoningDefaultShort": "默认 {{effort}}"
   },
   "providerPreset": {
     "label": "预设供应商",

@@ -92,6 +92,17 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
                 : typeof item?.base_instructions === "string"
                   ? item.base_instructions
                   : undefined;
+            const reasoningEfforts = Array.isArray(item?.reasoningEfforts)
+              ? item.reasoningEfforts
+              : Array.isArray(item?.reasoning_efforts)
+                ? item.reasoning_efforts
+                : undefined;
+            const defaultReasoningEffort =
+              typeof item?.defaultReasoningEffort === "string"
+                ? item.defaultReasoningEffort
+                : typeof item?.default_reasoning_effort === "string"
+                  ? item.default_reasoning_effort
+                  : undefined;
             return {
               model: typeof item?.model === "string" ? item.model : "",
               displayName:
@@ -113,6 +124,8 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
                 : {}),
               ...(inputModalities ? { inputModalities } : {}),
               ...(baseInstructions ? { baseInstructions } : {}),
+              ...(reasoningEfforts ? { reasoningEfforts } : {}),
+              ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
             };
           })
           .filter((item: CodexCatalogModel) => item.model.trim()),

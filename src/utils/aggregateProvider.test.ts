@@ -16,6 +16,8 @@ import {
   isResponsesCodexMember,
   knownCodexContextWindow,
   normalizeAggregateModelsForSave,
+  normalizeCodexReasoningEffortSubset,
+  normalizeModelDefaultReasoningEffort,
   parseAggregateSettings,
   setCodexReasoningEffortInConfig,
 } from "@/utils/aggregateProvider";
@@ -220,6 +222,63 @@ describe("aggregateProvider", () => {
       displayName: "DeepSeek Chat",
       contextWindow: 128000,
     });
+  });
+
+  it("round-trips per-model reasoning subsets through save/normalize/catalog", () => {
+    expect(
+      normalizeCodexReasoningEffortSubset(["low", "high", "bogus", "high"]),
+    ).toEqual(["low", "high"]);
+    // 全选六档原样返回（压缩为"未设置"由保存层负责，归一化只做过滤去重）。
+    expect(
+      normalizeCodexReasoningEffortSubset([
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+      ]),
+    ).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(normalizeCodexReasoningEffortSubset([])).toBeUndefined();
+    expect(normalizeModelDefaultReasoningEffort("low", ["low", "high"])).toBe(
+      "low",
+    );
+    expect(
+      normalizeModelDefaultReasoningEffort("max", ["low", "high"]),
+    ).toBeUndefined();
+    expect(
+      normalizeModelDefaultReasoningEffort("bogus", undefined),
+    ).toBeUndefined();
+
+    const models = [
+      {
+        model: "kimi-k3",
+        providerId: "kimi",
+        reasoningEfforts: ["low", "high"],
+        defaultReasoningEffort: "low",
+      },
+      { model: "gpt-5.6-sol", providerId: "openai" },
+    ];
+    const normalized = normalizeAggregateModelsForSave(models);
+    expect(normalized[0]).toMatchObject({
+      reasoningEfforts: ["low", "high"],
+      defaultReasoningEffort: "low",
+    });
+    expect(normalized[1]).not.toHaveProperty("reasoningEfforts");
+    const catalog = buildAggregateModelCatalog(normalized);
+    expect(catalog.models[0]).toMatchObject({
+      reasoningEfforts: ["low", "high"],
+      defaultReasoningEffort: "low",
+    });
+    const parsed = parseAggregateSettings({
+      aggregateModels: normalized,
+      memberProviderIds: ["kimi", "openai"],
+    });
+    expect(parsed.models[0]).toMatchObject({
+      reasoningEfforts: ["low", "high"],
+      defaultReasoningEffort: "low",
+    });
+    expect(parsed.models[1].reasoningEfforts).toBeUndefined();
   });
 
   it("keeps extra config.toml keys and auth when the user edited them", () => {

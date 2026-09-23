@@ -37,6 +37,7 @@ import {
 import { isNonNegativeDecimalString } from "@/types/usage";
 import { getCodexCustomTemplate } from "@/config/codexTemplates";
 import { resolveCodexContextWindow } from "@/utils/codexPresetContextWindows";
+import { normalizedModelReasoningFields } from "@/utils/aggregateProvider";
 import CodexConfigEditor from "./CodexConfigEditor";
 import { ProviderPresetSelector } from "./ProviderPresetSelector";
 import { BasicFormFields } from "./BasicFormFields";
@@ -100,11 +101,13 @@ export const normalizeCodexCatalogModelsForSave = (
     );
 
     const baseInstructions = item.baseInstructions?.trim();
+    const reasoningFields = normalizedModelReasoningFields(item);
 
     normalized.push({
       model,
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
+      ...reasoningFields,
       // Native Responses profile overrides (ignored by the chat/proxy profile).
       ...(typeof item.supportsParallelToolCalls === "boolean"
         ? { supportsParallelToolCalls: item.supportsParallelToolCalls }

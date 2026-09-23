@@ -861,7 +861,13 @@
     "reasoningGroupTitle": "思考能力",
     "reasoningSectionHint": "プリセットの供給元は自動的に設定され、カスタム供給元は名前/URL から自動推論されます。自動識別が正しくない場合のみ手動で上書きしてください。",
     "advancedSectionHint": "上流フォーマット、モデルマッピング、思考能力、カスタム User-Agent の設定を含みます。Chat Completions プロトコルを使用するプロバイダーはルーティング引き継ぎの有効化が必要です。",
-    "noCommonConfigToApply": "共通設定スニペットが空か、書き込む内容がありません"
+    "noCommonConfigToApply": "共通設定スニペットが空か、書き込む内容がありません",
+    "catalogColumnReasoning": "思考レベル",
+    "reasoningAllLevels": "全レベル",
+    "reasoningLevelsHint": "Codex メニューでこのモデルに表示する思考レベル。全選択で全6段階。",
+    "reasoningDefaultLabel": "デフォルト",
+    "reasoningDefaultPlaceholder": "グローバルに従う",
+    "reasoningDefaultShort": "デフォルト {{effort}}"
   },
   "providerPreset": {
     "label": "プロバイダータイプ",
