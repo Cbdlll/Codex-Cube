@@ -169,6 +169,16 @@ impl ProviderRouter {
         Ok(result)
     }
 
+    /// 判断 Provider 当前是否可纳入请求链路，不占用 HalfOpen 探测名额。
+    ///
+    /// 仅适用于路由/预检查；真正发起请求前仍需调用
+    /// `allow_provider_request()` 获取探测许可。
+    pub async fn is_provider_available(&self, provider_id: &str, app_type: &str) -> bool {
+        let circuit_key = format!("{app_type}:{provider_id}");
+        let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+        breaker.is_available().await
+    }
+
     /// 请求执行前获取熔断器“放行许可”
     ///
     /// - Closed：直接放行
@@ -621,6 +631,38 @@ mod tests {
         assert_eq!(providers.len(), 2);
 
         assert!(router.allow_provider_request("b", "codex").await.allowed);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_availability_probe_does_not_consume_half_open_permit() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        db.update_circuit_breaker_config(&CircuitBreakerConfig {
+            failure_threshold: 1,
+            timeout_seconds: 0,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let provider =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        db.save_provider("codex", &provider).unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        router
+            .record_result("a", "codex", false, false, Some("network down".to_string()))
+            .await
+            .unwrap();
+
+        // A route preflight may transition Open -> HalfOpen, but must not reserve
+        // the only probe slot needed by the real request.
+        assert!(router.is_provider_available("a", "codex").await);
+        let permit = router.allow_provider_request("a", "codex").await;
+        assert!(permit.allowed);
+        assert!(permit.used_half_open_permit);
     }
 
     #[tokio::test]

@@ -366,13 +366,14 @@ impl RequestContext {
             // 失效）时直接拒收，不再向坏上游转发。客户端对 503 会自动重试约
             // 30 次，透传只会把一次配置问题放大成 30 条失败记录；503 本身不
             // 可重试（换不换 provider 都一样坏），且熔断器本来就只由真实流量
-            // 驱动，这里只是让它生效。
+            // 驱动，这里只是让它生效。预检查必须不占用 HalfOpen 探测名额，
+            // 因为真正的单 Provider 转发会在 forwarder 中绕过 allow_request。
             if let Some(ref member) = member {
-                let permit = state
+                let available = state
                     .provider_router
-                    .allow_provider_request(&member.id, app_type_str)
+                    .is_provider_available(&member.id, app_type_str)
                     .await;
-                if !permit.allowed {
+                if !available {
                     return Err(ProxyError::ProviderUnhealthy(format!(
                         "供应商 `{}` 暂不可用（近期失败过多，已熔断），请稍后重试或检查上游渠道/鉴权",
                         member.name
