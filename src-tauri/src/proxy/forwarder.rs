@@ -315,6 +315,7 @@ impl RequestForwarder {
         provider: &Provider,
         app_type_str: &str,
         used_half_open_permit: bool,
+        is_single_provider: bool,
         rectifier_label: &str,
         last_error: &mut Option<ProxyError>,
         last_provider: &mut Option<Provider>,
@@ -328,16 +329,28 @@ impl RequestForwarder {
         };
 
         if is_provider_error {
-            let _ = self
-                .router
-                .record_result(
-                    &provider.id,
-                    app_type_str,
-                    used_half_open_permit,
-                    false,
-                    Some(retry_err.to_string()),
-                )
-                .await;
+            if is_single_provider {
+                let _ = self
+                    .router
+                    .record_db_health_only(
+                        &provider.id,
+                        app_type_str,
+                        false,
+                        Some(retry_err.to_string()),
+                    )
+                    .await;
+            } else {
+                let _ = self
+                    .router
+                    .record_result(
+                        &provider.id,
+                        app_type_str,
+                        used_half_open_permit,
+                        false,
+                        Some(retry_err.to_string()),
+                    )
+                    .await;
+            }
             {
                 let mut status = self.status.write().await;
                 status.last_error = Some(format!(
@@ -693,6 +706,7 @@ impl RequestForwarder {
                                             provider,
                                             app_type_str,
                                             used_half_open_permit,
+                                            is_single_provider,
                                             "media 降级",
                                             &mut last_error,
                                             &mut last_provider,
@@ -721,17 +735,32 @@ impl RequestForwarder {
 
                     match category {
                         ErrorCategory::Retryable => {
-                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
-                            let _ = self
-                                .router
-                                .record_result(
-                                    &provider.id,
-                                    app_type_str,
-                                    used_half_open_permit,
-                                    false,
-                                    Some(e.error.to_string()),
-                                )
-                                .await;
+                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度。
+                            // 单候选（直连单供应商/聚合单成员）无处可切，熔断只会把
+                            // 上游抖动放大成 60s 本地 503：只记 DB 健康展示用的
+                            // consecutive_failures，不推进内存熔断器状态机。
+                            if is_single_provider {
+                                let _ = self
+                                    .router
+                                    .record_db_health_only(
+                                        &provider.id,
+                                        app_type_str,
+                                        false,
+                                        Some(e.error.to_string()),
+                                    )
+                                    .await;
+                            } else {
+                                let _ = self
+                                    .router
+                                    .record_result(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                        false,
+                                        Some(e.error.to_string()),
+                                    )
+                                    .await;
+                            }
 
                             {
                                 let mut status = self.status.write().await;

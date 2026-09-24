@@ -362,24 +362,10 @@ impl RequestContext {
                 &request_model,
             )
             .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
-            // 熔断成员优先：成员熔断器已 Open（近期连续失败，如上游无渠道/鉴权
-            // 失效）时直接拒收，不再向坏上游转发。客户端对 503 会自动重试约
-            // 30 次，透传只会把一次配置问题放大成 30 条失败记录；503 本身不
-            // 可重试（换不换 provider 都一样坏），且熔断器本来就只由真实流量
-            // 驱动，这里只是让它生效。预检查必须不占用 HalfOpen 探测名额，
-            // 因为真正的单 Provider 转发会在 forwarder 中绕过 allow_request。
-            if let Some(ref member) = member {
-                let available = state
-                    .provider_router
-                    .is_provider_available(&member.id, app_type_str)
-                    .await;
-                if !available {
-                    return Err(ProxyError::ProviderUnhealthy(format!(
-                        "供应商 `{}` 暂不可用（近期失败过多，已熔断），请稍后重试或检查上游渠道/鉴权",
-                        member.name
-                    )));
-                }
-            }
+            // 单成员聚合走单 Provider 语义：不断路，直接透传上游真实错误。
+            // forwarder 会对单候选 bypass 熔断器放行检查，这里预检 Open 就
+            // 拒收会与 bypass 自相矛盾：上游抖动 4 次即 Open 后，60s 内所有
+            // 请求都变成 Variations 本地合成 503，上游恢复也无法立即生效。
             match member {
                 Some(member) => {
                     log::info!(
@@ -903,7 +889,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn aggregate_member_with_open_circuit_is_rejected_before_forward() {
+    async fn aggregate_member_with_open_circuit_still_forwards_single_member() {
         let _home = TempHome::new();
         let db = std::sync::Arc::new(Database::memory().expect("memory db"));
 
@@ -954,15 +940,13 @@ mod tests {
 
         let body = serde_json::json!({ "model": "bad-model", "input": "hi" });
         let headers = axum::http::HeaderMap::new();
-        let result =
+        // 单成员聚合不断路：即使成员熔断器 Open，上下文仍应建成并透传上游，
+        // 真实结果由 forwarder 记录，避免 60s 合成 503 掩盖上游恢复。
+        let ctx =
             RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await;
-        let err = result.err().expect("open-circuit member must be rejected");
-        match err {
-            ProxyError::ProviderUnhealthy(message) => {
-                assert!(message.contains("Bad Member"), "{message}");
-            }
-            other => panic!("expected ProviderUnhealthy, got {other:?}"),
-        }
+        let ctx = ctx.expect("open-circuit member must still build context");
+        assert_eq!(ctx.provider.id, "bad-member");
+        assert_eq!(ctx.get_providers().len(), 1);
     }
 
     #[tokio::test]

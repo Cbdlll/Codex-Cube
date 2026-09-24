@@ -232,6 +232,35 @@ impl ProviderRouter {
         Ok(())
     }
 
+    /// 仅更新 DB 健康展示（consecutive_failures/is_healthy），不推进内存熔断器。
+    ///
+    /// 用于单候选路径（直连单供应商/聚合单成员）：无处可切，熔断只会把上游
+    /// 抖动放大成本地 503 黑窗；健康徽章仍如实展示连续失败，排查不受影响。
+    pub async fn record_db_health_only(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+        success: bool,
+        error_msg: Option<String>,
+    ) -> Result<(), AppError> {
+        let failure_threshold = match self.db.get_proxy_config_for_app(app_type).await {
+            Ok(app_config) => app_config.circuit_failure_threshold,
+            Err(_) => 5, // 默认值
+        };
+
+        self.db
+            .update_provider_health_with_threshold(
+                provider_id,
+                app_type,
+                success,
+                error_msg.clone(),
+                failure_threshold,
+            )
+            .await?;
+
+        Ok(())
+    }
+
     /// 重置熔断器（手动恢复）
     pub async fn reset_circuit_breaker(&self, circuit_key: &str) {
         let breakers = self.circuit_breakers.read().await;
@@ -716,5 +745,42 @@ mod tests {
         let third = router.allow_provider_request("a", "codex").await;
         assert!(third.allowed);
         assert!(third.used_half_open_permit);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_db_health_only_never_opens_circuit() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        db.update_circuit_breaker_config(&CircuitBreakerConfig {
+            failure_threshold: 1,
+            timeout_seconds: 60,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let provider =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        db.save_provider("codex", &provider).unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+
+        // 单候选路径连续失败：只记 DB 健康，不推进内存熔断器。
+        for _ in 0..10 {
+            router
+                .record_db_health_only("a", "codex", false, Some("upstream 503".to_string()))
+                .await
+                .unwrap();
+        }
+
+        // 熔断器保持 Closed（放行检查不受影响），DB 健康如实记连续失败。
+        let permit = router.allow_provider_request("a", "codex").await;
+        assert!(permit.allowed);
+        assert!(!permit.used_half_open_permit);
+        let health = db.get_provider_health("a", "codex").await.unwrap();
+        assert_eq!(health.consecutive_failures, 10);
+        assert!(!health.is_healthy);
     }
 }
