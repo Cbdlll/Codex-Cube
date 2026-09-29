@@ -529,8 +529,11 @@ pub(crate) fn write_live_with_common_config(
     // sandbox/approval/project trust are Codex user permission state, not
     // provider routing state. Preserve them across independent provider
     // snapshots without carrying model aliases, endpoints, protocols, or
-    // catalogs between providers.
-    if matches!(app_type, AppType::Codex) && !provider.is_aggregate() {
+    // catalogs between providers. Aggregates are included: their stored TOML is
+    // a standalone document like any other provider's, so a non-takeover switch
+    // would otherwise drop the user's permission profile. This only shapes the
+    // live write — the stored row is never touched here.
+    if matches!(app_type, AppType::Codex) {
         match crate::codex_config::read_codex_live_settings() {
             Ok(live_settings) => {
                 effective_provider.settings_config =
@@ -648,47 +651,14 @@ fn restore_live_settings_for_provider_backfill(
     settings
 }
 
-/// 聚合 Provider 是虚拟供应商：`settingsConfig` 保存的是成员/模型映射，不是
-/// live 配置的镜像。切走/同步时绝不能拿 live 配置回填覆盖，否则
-/// `memberProviderIds` / `aggregateModels` 会丢失。
+/// 聚合 Provider 的 `settingsConfig` 保存的是成员/模型映射，整包回填会连同
+/// `memberProviderIds` / `aggregateModels` 一起被 live 覆盖，所以它不参与回填。
+///
+/// 这也是聚合供应商唯一需要排除的地方：它的 `config.toml` 由 Cube 向导和用户
+/// 自己拥有，live 配置不再以任何形式写回存储（见
+/// `codex_config::normalize_aggregate_codex_settings`）。
 pub(crate) fn should_backfill_provider_from_live(provider: &Provider) -> bool {
     !provider.is_aggregate()
-}
-
-/// 把当前 Live 里的用户偏好写回指定聚合供应商（不碰 auth / 成员映射）。
-pub(crate) fn persist_aggregate_user_settings_from_live(
-    db: &Database,
-    provider_id: &str,
-    live: &Value,
-) -> Result<(), AppError> {
-    let Some(provider) = db.get_provider_by_id(provider_id, AppType::Codex.as_str())? else {
-        return Ok(());
-    };
-    if !provider.is_aggregate() {
-        return Ok(());
-    }
-    let merged =
-        crate::codex_config::merge_codex_live_user_settings_into_aggregate(
-            &provider.settings_config,
-            live,
-        );
-    if merged == provider.settings_config {
-        return Ok(());
-    }
-    db.update_provider_settings_config(AppType::Codex.as_str(), provider_id, &merged)
-}
-
-/// 若当前供应商是聚合，把 Live 用户设置写回它的存储配置。
-pub(crate) fn persist_current_aggregate_user_settings_from_live(
-    db: &Database,
-) -> Result<(), AppError> {
-    let Some(current_id) =
-        crate::settings::get_effective_current_provider(db, &AppType::Codex)?
-    else {
-        return Ok(());
-    };
-    let live = crate::codex_config::read_codex_live_settings()?;
-    persist_aggregate_user_settings_from_live(db, &current_id, &live)
 }
 
 /// Keep stored/live `[model_providers.<active>].name` aligned with Cube's

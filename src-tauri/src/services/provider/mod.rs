@@ -27,7 +27,6 @@ pub use live::{
 // Internal re-exports (pub(crate))
 pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
-    persist_aggregate_user_settings_from_live, persist_current_aggregate_user_settings_from_live,
     provider_exists_in_live_config, should_backfill_provider_from_live,
     strip_common_config_from_live_settings, sync_codex_provider_display_name_in_settings,
     sync_current_provider_for_app_to_live, write_live_with_common_config,
@@ -1129,6 +1128,130 @@ wire_api = "responses"
             assert_eq!(script.base_url, None);
         });
     }
+    /// 聚合的 `config.toml` 只在保存时归一。归一曾经漏接在保存路径上（只挂在
+    /// 删除成员的级联修复里），向导保存后存储仍是脏的。
+    #[test]
+    #[serial]
+    fn saving_aggregate_normalizes_its_own_config_toml() {
+        with_test_home(|state, _| {
+            let mut provider = Provider::with_id(
+                "agg-save".to_string(),
+                "Aggregation".to_string(),
+                json!({
+                    "auth": {},
+                    "defaultReasoningEffort": "xhigh",
+                    "config": "model_reasoning_effort = \"low\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n\n[mcp_servers.node_repl]\ncommand = \"/bin/true\"\n",
+                    "memberProviderIds": ["member-1"],
+                    "aggregateModels": [
+                        { "model": "gpt-5.6-sol", "providerId": "member-1", "upstreamModel": "gpt-5.6-sol" }
+                    ],
+                    "modelCatalog": { "models": [] }
+                }),
+                None,
+            );
+            provider.meta = Some(crate::provider::ProviderMeta {
+                provider_type: Some("aggregate".to_string()),
+                ..Default::default()
+            });
+
+            ProviderService::add(state, AppType::Codex, provider, false).expect("add aggregate");
+
+            let stored = state
+                .db
+                .get_provider_by_id("agg-save", AppType::Codex.as_str())
+                .expect("query saved provider")
+                .expect("saved provider should exist");
+            let config = stored
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .expect("stored config");
+
+            assert!(
+                config.contains("model_provider = \"custom\""),
+                "保存时必须补上聚合唯一的 custom 路由，got: {config}"
+            );
+            assert!(
+                config.contains("model = \"gpt-5.6-sol\""),
+                "model 必须对齐 defaultModel/目录首项，got: {config}"
+            );
+            assert!(
+                config.contains("model_reasoning_effort = \"xhigh\""),
+                "推理档位必须以向导值为准，不能留在 TOML 里的旧值，got: {config}"
+            );
+            assert!(
+                !config.contains("PROXY_MANAGED") && !config.contains("mcp_servers"),
+                "接管投影产物与 MCP 不得留在聚合自己的 config.toml，got: {config}"
+            );
+        });
+    }
+
+    /// 回归：聚合供应商的 `config.toml` 是独立文档，live 配置不写入存储。
+    /// 旧实现每次 `list()` 都把整份 live 合并回存储且只增不删，用户在
+    /// `config.toml` 里删掉的键因此永远删不掉。
+    #[test]
+    #[serial]
+    fn listing_providers_does_not_merge_live_into_aggregate_config() {
+        with_test_home(|state, _| {
+            let mut provider = Provider::with_id(
+                "agg-list".to_string(),
+                "Aggregation".to_string(),
+                json!({
+                    "auth": {},
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"high\"\n",
+                    "memberProviderIds": ["member-1"],
+                    "aggregateModels": [
+                        { "model": "gpt-5.6-sol", "providerId": "member-1", "upstreamModel": "gpt-5.6-sol" }
+                    ],
+                    "modelCatalog": { "models": [] }
+                }),
+                None,
+            );
+            provider.meta = Some(crate::provider::ProviderMeta {
+                provider_type: Some("aggregate".to_string()),
+                ..Default::default()
+            });
+
+            ProviderService::add(state, AppType::Codex, provider, false).expect("add aggregate");
+
+            // live 里出现了聚合供应商自己的 TOML 没有的键。
+            crate::codex_config::write_codex_live_config_atomic(Some(
+                "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\ndisable_response_storage = true\npersonality = \"pragmatic\"\n\n[desktop]\nlocaleOverride = \"en-US\"\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15921/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n",
+            ))
+            .expect("write live config");
+
+            ProviderService::list(state, AppType::Codex).expect("list providers");
+
+            let stored = state
+                .db
+                .get_provider_by_id("agg-list", AppType::Codex.as_str())
+                .expect("query saved provider")
+                .expect("saved provider should exist");
+            let config = stored
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .expect("stored config");
+
+            for leaked in [
+                "disable_response_storage",
+                "personality",
+                "localeOverride",
+                "15921",
+            ] {
+                assert!(
+                    !config.contains(leaked),
+                    "live 的 {leaked} 不得被合并进聚合供应商的 config.toml，got: {config}"
+                );
+            }
+            assert_eq!(
+                stored.settings_config.get("memberProviderIds"),
+                Some(&json!(["member-1"])),
+                "成员映射必须原样保留"
+            );
+        });
+    }
+
     #[test]
     #[serial]
     fn add_preserves_distinct_usage_credentials() {
@@ -1534,12 +1657,6 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<IndexMap<String, Provider>, AppError> {
-        if matches!(app_type, AppType::Codex) {
-            if let Err(error) = persist_current_aggregate_user_settings_from_live(state.db.as_ref())
-            {
-                log::warn!("同步聚合供应商用户设置失败（不影响列表）: {error}");
-            }
-        }
         state.db.get_all_providers(app_type.as_str())
     }
 
@@ -1699,8 +1816,8 @@ impl ProviderService {
 
                 if matches!(app_type, AppType::Codex) {
                     // 当前供应商保存后必须立刻投影到 Live。代理是否正在运行不影响
-                    // ~/.codex/config.toml 是否该更新；否则默认模型/推理强度会只写库、
-                    // 随后 list() 再用旧 Live 盖回去。
+                    // ~/.codex/config.toml 是否该更新；否则默认模型/推理强度会只写库，
+                    // 用户在 Codex 里看到的仍是旧值。
                     futures::executor::block_on(
                         state
                             .proxy_service
@@ -2157,16 +2274,9 @@ impl ProviderService {
                                 } else {
                                     backfill_completed = true;
                                 }
-                            } else if let Err(error) = persist_aggregate_user_settings_from_live(
-                                state.db.as_ref(),
-                                &current_id,
-                                &live_config,
-                            ) {
-                                log::warn!(
-                                    "同步聚合 Provider '{}' 的用户设置失败: {error}",
-                                    current_provider.id
-                                );
                             }
+                            // 聚合 Provider 不做回填：它的 config.toml 由向导和
+                            // 用户自己拥有，live 配置不写入存储。
                         }
                     }
                 }

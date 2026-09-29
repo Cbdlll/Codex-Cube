@@ -3006,22 +3006,6 @@ const CODEX_TAKEOVER_PROJECTED_KEYS: &[&str] = &[
     "model_providers",
 ];
 
-/// 聚合供应商存储配置不应收下的 Live 投影字段。
-/// `model` / `model_reasoning_effort` 由专用逻辑回写，避免把代理 URL、MCP、
-/// catalog 路径写进虚拟供应商。
-const CODEX_AGGREGATE_STORED_SKIP_KEYS: &[&str] = &[
-    "model",
-    "model_reasoning_effort",
-    "model_provider",
-    "base_url",
-    "wire_api",
-    "experimental_bearer_token",
-    "model_catalog_json",
-    "model_providers",
-    "mcp_servers",
-    "mcp",
-];
-
 /// Codex permission settings are application/user state, not provider routing
 /// state. A provider switch must not silently reset them just because each
 /// provider owns an independent config snapshot.
@@ -3122,118 +3106,6 @@ pub fn merge_codex_live_user_settings_into_backup(backup: &Value, live: &Value) 
     if let Some(obj) = result.as_object_mut() {
         obj.insert("config".to_string(), Value::String(merged.to_string()));
     }
-    result
-}
-
-/// 把 Live 里的用户设置写回聚合供应商，但不覆盖成员/模型映射，也不收下 auth。
-///
-/// 聚合供应商跳过了普通的 live 整包回填，否则 `aggregateModels` 会丢。结果是
-/// Codex Desktop 里改过的 personality、`[desktop]` 等从未进入供应商自己的
-/// `config.toml`。这里按字段合并：路由投影仍由接管生成，用户偏好落进存储；
-/// `defaultModel` / `defaultReasoningEffort` 只认 Cube 向导保存值。
-///
-/// `defaultModel` / `defaultReasoningEffort` 是用户在 Cube 向导里保存的值，
-/// 不能被 Codex 会话或成员供应商 Live 配置覆盖。仅当用户从未配置默认值时，
-/// 才用 live / 目录首项做首次补齐；目录失效时由 `repair_aggregate_defaults`
-/// 自动改到仍存在的首个模型。
-pub fn merge_codex_live_user_settings_into_aggregate(
-    provider_settings: &Value,
-    live: &Value,
-) -> Value {
-    let mut result = provider_settings.clone();
-    let Some(result_obj) = result.as_object_mut() else {
-        return provider_settings.clone();
-    };
-
-    let stored_cfg = result_obj
-        .get("config")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let mut merged = if stored_cfg.trim().is_empty() {
-        DocumentMut::new()
-    } else {
-        match parse_codex_toml_document(&stored_cfg) {
-            Ok(doc) => doc,
-            Err(_) => return provider_settings.clone(),
-        }
-    };
-
-    let live_doc = live
-        .get("config")
-        .and_then(Value::as_str)
-        .and_then(|text| parse_codex_toml_document(text).ok());
-    if let Some(live_doc) = live_doc.as_ref() {
-        let usable = codex_config_text_has_proxy_projection(live_doc)
-            || live_doc
-                .get("model_provider")
-                .and_then(toml_edit::Item::as_str)
-                == Some("custom");
-        if usable {
-            for (key, value) in live_doc.iter() {
-                if CODEX_AGGREGATE_STORED_SKIP_KEYS.contains(&key) {
-                    continue;
-                }
-                merged.insert(key, value.clone());
-            }
-        }
-    }
-
-    merged.as_table_mut().remove("mcp_servers");
-    merged.as_table_mut().remove("mcp");
-    merged["model_provider"] = toml_edit::value("custom");
-
-    let catalog_models: Vec<String> = result_obj
-        .get("aggregateModels")
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row.get("model").and_then(Value::as_str))
-                .filter(|model| !model.trim().is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    let in_catalog = |model: &str| catalog_models.iter().any(|item| item == model);
-    let live_model = live_doc
-        .as_ref()
-        .and_then(|doc| doc.get("model").and_then(toml_edit::Item::as_str))
-        .map(str::trim)
-        .filter(|model| !model.is_empty() && in_catalog(model))
-        .map(str::to_string);
-    let user_model = read_aggregate_stored_default_model(provider_settings);
-    let mut repaired_default = false;
-    let model = match user_model {
-        Some(model) if in_catalog(&model) => Some(model),
-        Some(_) => {
-            repaired_default = true;
-            catalog_models.first().cloned()
-        }
-        None => live_model.or_else(|| catalog_models.first().cloned()),
-    };
-    if let Some(model) = model {
-        merged["model"] = toml_edit::value(model.as_str());
-        result_obj.insert("defaultModel".to_string(), json!(model));
-        if repaired_default {
-            log::info!(
-                "聚合默认模型已失效，自动切换到仍存在的模型 \"{model}\""
-            );
-        }
-    }
-
-    let stored_effort = settings_default_reasoning_effort(provider_settings);
-    let live_effort = live_doc
-        .as_ref()
-        .and_then(|doc| {
-            doc.get("model_reasoning_effort")
-                .and_then(toml_edit::Item::as_str)
-        })
-        .and_then(normalize_codex_reasoning_effort);
-    let effort = stored_effort.or(live_effort).unwrap_or("high");
-    merged["model_reasoning_effort"] = toml_edit::value(effort);
-    result_obj.insert("defaultReasoningEffort".to_string(), json!(effort));
-
-    result_obj.insert("config".to_string(), json!(merged.to_string()));
     result
 }
 
@@ -3507,6 +3379,90 @@ pub(crate) fn repair_aggregate_defaults(settings: &mut Value) -> bool {
     merged["model_reasoning_effort"] = toml_edit::value(effort);
     root.insert("config".to_string(), json!(merged.to_string()));
     root.insert("defaultReasoningEffort".to_string(), json!(effort));
+    true
+}
+
+/// Keep an aggregate provider's own `config.toml` self-consistent at save time.
+///
+/// The aggregate's TOML is a standalone document with the same owner as an
+/// ordinary provider's: the Cube wizard and the user. Nothing is merged into it
+/// from the live `~/.codex/config.toml` — that mirror is what used to pin every
+/// live key (including `disable_response_storage`) into the stored row and
+/// rewrite it on each provider-list refresh.
+///
+/// This function is the single writer of the routing fields the aggregate does
+/// not own end-to-end:
+///
+/// - `model_provider` is always `custom` (the only route an aggregate has).
+/// - `model` follows `defaultModel`, falling back to the first catalog slot and
+///   disappearing when the catalog is empty.
+/// - `model_reasoning_effort` follows `defaultReasoningEffort`.
+/// - `mcp_servers` / `mcp` are removed: MCP belongs to the DB `mcp_servers`
+///   table, the same rule `extract_codex_common_config` applies.
+///
+/// Every other key the user authored is left untouched. Returns whether the
+/// stored document changed.
+pub(crate) fn normalize_aggregate_codex_settings(settings: &mut Value) -> bool {
+    let entries = codex_aggregate_model_entries(settings);
+    if entries.is_empty() {
+        return false;
+    }
+
+    let stored_cfg = settings
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut doc = if stored_cfg.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        match parse_codex_toml_document(&stored_cfg) {
+            Ok(doc) => doc,
+            // A TOML the user cannot parse is theirs to fix; never silently
+            // replace it with a generated document.
+            Err(_) => return false,
+        }
+    };
+
+    fn set_str_key(doc: &mut DocumentMut, changed: &mut bool, key: &str, value: &str) {
+        if doc.get(key).and_then(|item| item.as_str()) == Some(value) {
+            return;
+        }
+        doc[key] = toml_edit::value(value);
+        *changed = true;
+    }
+
+    let mut changed = false;
+    set_str_key(&mut doc, &mut changed, "model_provider", "custom");
+
+    match resolve_aggregate_default_model(settings, &entries) {
+        Some(model) => set_str_key(&mut doc, &mut changed, "model", model.as_str()),
+        None => changed |= doc.as_table_mut().remove("model").is_some(),
+    }
+
+    let effort = settings_default_reasoning_effort(settings).unwrap_or("high");
+    set_str_key(&mut doc, &mut changed, "model_reasoning_effort", effort);
+
+    for key in ["mcp_servers", "mcp"] {
+        changed |= doc.as_table_mut().remove(key).is_some();
+    }
+    // 接管投影的产物不属于供应商自己的文档：顶层路由字段由
+    // `[model_providers.custom]` 表达，bearer 占位符和 catalog 指针只活在 live。
+    for key in [
+        "base_url",
+        "wire_api",
+        "experimental_bearer_token",
+        "model_catalog_json",
+    ] {
+        changed |= doc.as_table_mut().remove(key).is_some();
+    }
+
+    if !changed {
+        return false;
+    }
+    if let Some(root) = settings.as_object_mut() {
+        root.insert("config".to_string(), json!(doc.to_string()));
+    }
     true
 }
 
@@ -7078,72 +7034,6 @@ base_url = "http://127.0.0.1:9999/v1"
     }
 
     #[test]
-    fn merge_live_user_settings_into_aggregate_keeps_mappings_and_reasoning() {
-        let stored = json!({
-            "auth": {},
-            "defaultModel": "gpt-5.6-sol",
-            "memberProviderIds": ["opencode"],
-            "aggregateModels": [
-                { "model": "gpt-5.6-sol", "providerId": "opencode", "upstreamModel": "gpt-5.6-sol" }
-            ],
-            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-        });
-        let live = json!({
-            "auth": { "OPENAI_API_KEY": "PROXY_MANAGED" },
-            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"low\"\npersonality = \"pragmatic\"\ndisable_response_storage = true\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n\n[desktop]\nlocaleOverride = \"en-US\"\n\n[mcp_servers.node_repl]\ncommand = \"/bin/true\"\n"
-        });
-
-        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
-        let cfg = merged
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("config");
-        assert_eq!(
-            merged.get("defaultReasoningEffort").and_then(Value::as_str),
-            Some("low")
-        );
-        assert_eq!(
-            merged.get("defaultModel").and_then(Value::as_str),
-            Some("gpt-5.6-sol")
-        );
-        assert!(
-            cfg.contains("model_reasoning_effort = \"low\""),
-            "reasoning effort must be stored on the aggregate provider, got: {cfg}"
-        );
-        assert!(
-            cfg.contains("personality = \"pragmatic\""),
-            "personality must be stored on the aggregate provider"
-        );
-        assert!(
-            cfg.contains("localeOverride = \"en-US\""),
-            "desktop settings must be stored on the aggregate provider"
-        );
-        assert!(
-            !cfg.contains("mcp_servers"),
-            "MCP belongs to live config.toml, not the aggregate provider"
-        );
-        assert!(
-            !cfg.contains("127.0.0.1:15721"),
-            "proxy base_url must not be stored on the aggregate provider"
-        );
-        assert!(
-            merged
-                .get("auth")
-                .and_then(Value::as_object)
-                .is_some_and(|auth| auth.is_empty()),
-            "aggregate auth must stay empty"
-        );
-        assert_eq!(
-            merged
-                .get("aggregateModels")
-                .and_then(Value::as_array)
-                .map(|rows| rows.len()),
-            Some(1),
-            "member model mappings must not be replaced"
-        );
-    }
-
-    #[test]
     fn aggregate_build_takeover_toml_keeps_user_default_model_over_live_session() {
         let provider = crate::provider::Provider::with_id(
             "agg-1".to_string(),
@@ -7221,126 +7111,107 @@ model_reasoning_effort = "max"
     }
 
     #[test]
-    fn merge_live_user_settings_into_aggregate_repairs_orphan_default_model() {
-        let stored = json!({
-            "defaultModel": "kimi-k3",
+    fn normalize_aggregate_config_syncs_routing_fields_and_keeps_user_toml() {
+        let mut settings = json!({
+            "auth": {},
+            "defaultModel": "gpt-5.6-sol",
+            "defaultReasoningEffort": "xhigh",
             "memberProviderIds": ["opencode"],
             "aggregateModels": [
-                { "model": "glm-5.2", "providerId": "opencode", "upstreamModel": "glm-5.2" }
+                { "model": "gpt-5.6-sol", "providerId": "opencode", "upstreamModel": "gpt-5.6-sol" }
             ],
-            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\nmodel_reasoning_effort = \"high\"\n"
-        });
-        let live = json!({
-            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\nmodel_reasoning_effort = \"max\"\n"
+            "config": "model_reasoning_effort = \"low\"\npersonality = \"pragmatic\"\n\n[desktop]\nlocaleOverride = \"en-US\"\n"
         });
 
-        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
-        assert_eq!(
-            merged.get("defaultModel").and_then(Value::as_str),
-            Some("glm-5.2"),
-            "orphaned default model must fall back to the first remaining slot"
-        );
-        assert_eq!(
-            merged.get("defaultReasoningEffort").and_then(Value::as_str),
-            Some("high"),
-            "user reasoning effort must stay unchanged during repair"
-        );
-    }
+        assert!(normalize_aggregate_codex_settings(&mut settings));
 
-    #[test]
-    fn merge_live_user_settings_into_aggregate_does_not_overwrite_default_model() {
-        let stored = json!({
-            "auth": {},
-            "defaultModel": "glm-5.2",
-            "memberProviderIds": ["opencode"],
-            "aggregateModels": [
-                { "model": "glm-5.2", "providerId": "opencode", "upstreamModel": "glm-5.2" },
-                { "model": "kimi-k3", "providerId": "opencode", "upstreamModel": "kimi-k3" }
-            ],
-            "config": "model_provider = \"custom\"\nmodel = \"glm-5.2\"\nmodel_reasoning_effort = \"high\"\n"
-        });
-        let live = json!({
-            "auth": {},
-            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\nmodel_reasoning_effort = \"max\"\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n"
-        });
-
-        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
-        let cfg = merged
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("config");
-        assert_eq!(
-            merged.get("defaultModel").and_then(Value::as_str),
-            Some("glm-5.2"),
-            "Codex session model must not overwrite the Cube default model"
+        let cfg = settings.get("config").and_then(Value::as_str).unwrap();
+        assert!(
+            cfg.contains("model_provider = \"custom\""),
+            "聚合只走 custom 路由，got: {cfg}"
         );
         assert!(
-            cfg.contains("model = \"glm-5.2\""),
-            "stored aggregate config.toml model must stay the Cube default, got: {cfg}"
+            cfg.contains("model = \"gpt-5.6-sol\""),
+            "model 必须跟随 defaultModel，got: {cfg}"
         );
-        assert_eq!(
-            merged.get("defaultReasoningEffort").and_then(Value::as_str),
-            Some("high"),
-            "Codex session reasoning effort must not overwrite the Cube default"
+        assert!(
+            cfg.contains("model_reasoning_effort = \"xhigh\""),
+            "推理档位必须跟随 defaultReasoningEffort，got: {cfg}"
         );
+        assert!(
+            cfg.contains("personality = \"pragmatic\"")
+                && cfg.contains("localeOverride = \"en-US\""),
+            "用户自己写的键必须原样保留，got: {cfg}"
+        );
+
+        // 幂等：再次归一不应产生变更
+        assert!(!normalize_aggregate_codex_settings(&mut settings));
     }
 
     #[test]
-    fn merge_live_user_settings_into_aggregate_bootstraps_missing_default_model() {
-        let stored = json!({
+    fn normalize_aggregate_config_scrubs_foreign_state_and_repairs_orphan_default() {
+        let mut settings = json!({
             "auth": {},
+            "defaultModel": "deleted-model",
+            "defaultReasoningEffort": "low",
             "memberProviderIds": ["opencode"],
             "aggregateModels": [
-                { "model": "glm-5.2", "providerId": "opencode", "upstreamModel": "glm-5.2" },
-                { "model": "kimi-k3", "providerId": "opencode", "upstreamModel": "kimi-k3" }
+                { "model": "gpt-5.6-sol", "providerId": "opencode", "upstreamModel": "gpt-5.6-sol" }
             ],
-            "config": "model_provider = \"custom\"\n"
-        });
-        let live = json!({
-            "auth": {},
-            "config": "model_provider = \"custom\"\nmodel = \"kimi-k3\"\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\n"
+            "config": "model_provider = \"custom\"\nmodel = \"deleted-model\"\nbase_url = \"http://127.0.0.1:15921/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\nmodel_catalog_json = \"/Users/x/.codex/codex-cube-model-catalog.json\"\n\n[mcp_servers.node_repl]\ncommand = \"/bin/true\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
         });
 
-        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
+        assert!(repair_aggregate_defaults(&mut settings));
+        assert!(normalize_aggregate_codex_settings(&mut settings));
+
+        let cfg = settings.get("config").and_then(Value::as_str).unwrap();
+        assert!(
+            cfg.contains("model = \"gpt-5.6-sol\""),
+            "失效的默认模型必须回落到目录首项，got: {cfg}"
+        );
+        assert!(
+            !cfg.contains("mcp_servers") && !cfg.contains("node_repl"),
+            "MCP 归 DB mcp_servers 表所有，不得留在聚合的 config.toml，got: {cfg}"
+        );
+        for artifact in [
+            "127.0.0.1:15921",
+            "experimental_bearer_token",
+            "PROXY_MANAGED",
+            "model_catalog_json",
+        ] {
+            assert!(
+                !cfg.contains(artifact),
+                "接管投影产物 {artifact} 不得留在聚合自己的 config.toml，got: {cfg}"
+            );
+        }
+        assert!(
+            cfg.contains("[model_providers.custom]") && cfg.contains("requires_openai_auth = true"),
+            "供应商自己的路由段必须保留，got: {cfg}"
+        );
         assert_eq!(
-            merged.get("defaultModel").and_then(Value::as_str),
-            Some("kimi-k3"),
-            "live model may initialize defaultModel only when Cube has none"
+            settings.get("defaultModel").and_then(Value::as_str),
+            Some("gpt-5.6-sol")
         );
     }
 
     #[test]
-    fn merge_live_user_settings_into_aggregate_repairs_duplicate_reasoning_effort() {
-        let stored = json!({
+    fn normalize_aggregate_config_leaves_unparsable_toml_alone() {
+        let mut settings = json!({
             "auth": {},
             "defaultModel": "gpt-5.6-sol",
             "memberProviderIds": ["opencode"],
             "aggregateModels": [
                 { "model": "gpt-5.6-sol", "providerId": "opencode", "upstreamModel": "gpt-5.6-sol" }
             ],
-            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"high\"\nmodel_reasoning_effort = \"low\"\nmodel_reasoning_effort = \"low\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\n"
-        });
-        let live = json!({
-            "auth": {},
-            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"max\"\n\n[model_providers.custom]\nname = \"multi-provider\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n"
+            "config": "this is not = = valid toml"
         });
 
-        let merged = merge_codex_live_user_settings_into_aggregate(&stored, &live);
-        let cfg = merged
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("config");
+        assert!(!normalize_aggregate_codex_settings(&mut settings));
         assert_eq!(
-            cfg.matches("model_reasoning_effort =").count(),
-            1,
-            "duplicate reasoning effort keys must be collapsed, got: {cfg}"
+            settings.get("config").and_then(Value::as_str),
+            Some("this is not = = valid toml"),
+            "无法解析的 TOML 必须原样保留，交给用户自己修"
         );
-        assert_eq!(
-            merged.get("defaultReasoningEffort").and_then(Value::as_str),
-            Some("low"),
-            "stored duplicate config.toml reasoning effort must win over live"
-        );
-        toml::from_str::<toml::Table>(cfg).expect("merged config must be valid TOML");
     }
 
     #[test]

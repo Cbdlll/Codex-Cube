@@ -80,8 +80,13 @@ fn prune_deleted_codex_aggregate_member(settings: &mut Value, deleted_id: &str) 
     }
 
     let defaults_repaired = crate::codex_config::repair_aggregate_defaults(settings);
+    let config_normalized = crate::codex_config::normalize_aggregate_codex_settings(settings);
 
-    members_changed || aggregate_models_changed || catalog_changed || defaults_repaired
+    members_changed
+        || aggregate_models_changed
+        || catalog_changed
+        || defaults_repaired
+        || config_normalized
 }
 
 impl Database {
@@ -246,6 +251,21 @@ impl Database {
     }
 
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
+        // 聚合供应商的 config.toml 是独立文档，所有权在 Cube 向导和用户。保存
+        // 是它唯一的维护时机：路由字段对齐 defaultModel/defaultReasoningEffort，
+        // 并清掉接管投影产物。MCP 归 DB mcp_servers 表所有。普通供应商原样落库。
+        //
+        // 删除成员时的级联修复走 delete_codex_provider_and_prune_aggregate_references
+        // 的裸 SQL，不经过这里，所以那边仍需自己调 repair。
+        let settings_to_store = if app_type == "codex" && provider.is_aggregate() {
+            let mut settings = provider.settings_config.clone();
+            crate::codex_config::repair_aggregate_defaults(&mut settings);
+            crate::codex_config::normalize_aggregate_codex_settings(&mut settings);
+            settings
+        } else {
+            provider.settings_config.clone()
+        };
+
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
@@ -289,7 +309,7 @@ impl Database {
                 WHERE id = ?13 AND app_type = ?14",
                 params![
                     provider.name,
-                    serde_json::to_string(&provider.settings_config).map_err(|e| {
+                    serde_json::to_string(&settings_to_store).map_err(|e| {
                         AppError::Database(format!("Failed to serialize settings_config: {e}"))
                     })?,
                     provider.website_url,
@@ -319,7 +339,7 @@ impl Database {
                     provider.id,
                     app_type,
                     provider.name,
-                    serde_json::to_string(&provider.settings_config)
+                    serde_json::to_string(&settings_to_store)
                         .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
                     provider.website_url,
                     provider.category,

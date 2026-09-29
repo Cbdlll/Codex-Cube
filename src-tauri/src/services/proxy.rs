@@ -10,8 +10,7 @@ use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
 use crate::services::provider::{
-    build_effective_settings_with_common_config, persist_aggregate_user_settings_from_live,
-    write_live_with_common_config,
+    build_effective_settings_with_common_config, write_live_with_common_config,
 };
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
@@ -676,20 +675,10 @@ impl ProxyService {
                         if crate::proxy::providers::is_codex_official_provider(&provider) {
                             return Ok(());
                         }
-                        // 聚合 Provider 是虚拟供应商：不要把 live 的 key 写进
-                        // settingsConfig，但要把推理档位等用户设置写回存储，
-                        // 否则编辑页的 config.toml 会缺 model_reasoning_effort。
+                        // 聚合 Provider 是虚拟供应商：它的 config.toml 由 Cube
+                        // 向导和用户自己拥有，live 配置一律不写回存储（成员/模型
+                        // 映射会丢，用户在 live 里删掉的键也再也删不掉）。
                         if provider.is_aggregate() {
-                            if let Err(error) = persist_aggregate_user_settings_from_live(
-                                self.db.as_ref(),
-                                &provider_id,
-                                live_config,
-                            ) {
-                                log::warn!(
-                                    "同步聚合 Provider '{}' 的用户设置失败: {error}",
-                                    provider_id
-                                );
-                            }
                             return Ok(());
                         }
 
@@ -1654,25 +1643,10 @@ impl ProxyService {
 
         let prepare_result: Result<(), String> = async {
             if should_sync_backup {
-                if let Some(previous_id) = previous_provider_id.as_deref() {
-                    if previous_id != provider_id {
-                        if let Ok(live) = self.read_codex_live() {
-                            if let Err(error) = persist_aggregate_user_settings_from_live(
-                                self.db.as_ref(),
-                                previous_id,
-                                &live,
-                            ) {
-                                log::warn!(
-                                    "热切换前同步聚合 Provider '{previous_id}' 的用户设置失败: {error}"
-                                );
-                            }
-                        }
-                    }
-                }
-                // 聚合 Provider 是虚拟供应商：没有自己的独立上游 config.toml。
-                // 热切换时保留接管开始时备份的原始 Live 配置，否则用空配置
-                // 覆盖备份后，用户在聚合 Provider 上直接关闭接管会恢复出一个
-                // 空 config.toml，Codex 又会回落到 api.openai.com。
+                // 聚合 Provider 不参与备份重建：它的 config.toml 是给 Codex
+                // 用的路由文档，不是可回滚的上游配置。热切换时保留接管开始时
+                // 备份的原始 Live 配置，否则用户在聚合 Provider 上直接关闭接管
+                // 会恢复出一个空 config.toml，Codex 又会回落到 api.openai.com。
                 if !provider.is_aggregate() {
                     self.update_live_backup_from_provider_inner(app_type, &provider)
                         .await?;
@@ -6624,29 +6598,97 @@ experimental_bearer_token = "PROXY_MANAGED"
             "saved default reasoning effort must not be overwritten by stale live config"
         );
 
-        persist_aggregate_user_settings_from_live(
-            db.as_ref(),
-            "agg-1",
-            &crate::codex_config::read_codex_live_settings().expect("read live settings"),
-        )
-        .expect("list() persist after projecting saved defaults");
-        let stored_after_list = db
+        // 投影到 live 之后，聚合供应商自己的 config.toml 必须一字未动：
+        // live 既是基底也是路由投影的来源，但它不是存储的输入。
+        let stored_after_projection = db
             .get_provider_by_id("agg-1", "codex")
             .expect("reload stored aggregate")
             .expect("aggregate exists");
         assert_eq!(
-            stored_after_list
-                .settings_config
-                .get("defaultModel")
-                .and_then(Value::as_str),
-            Some("deepseek-v4-flash")
+            stored_after_projection.settings_config, stored.settings_config,
+            "投影到 live 不得反写聚合供应商的存储配置"
+        );
+    }
+
+    /// 用户报告的原始症状的端到端防线：live 的 config.toml 是接管投影的基底，
+    /// 聚合供应商自己的 config.toml 不参与。即使存储里还留着历史污染的
+    /// `disable_response_storage`，用户在 live 里删掉它之后再投影，它也不能回来。
+    #[tokio::test]
+    #[serial]
+    async fn aggregate_projection_never_resurrects_a_key_deleted_from_live() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_codex_model_template();
+
+        // 存储里留着污染的键（历史 merge 写进去的）。
+        let mut aggregate = Provider::with_id(
+            "agg-stale".to_string(),
+            "My Aggregate".to_string(),
+            json!({
+                "auth": {},
+                "defaultModel": "gpt-5.6-sol",
+                "defaultReasoningEffort": "high",
+                "memberProviderIds": ["member-1"],
+                "aggregateModels": [
+                    { "model": "gpt-5.6-sol", "providerId": "member-1", "upstreamModel": "gpt-5.6-sol" }
+                ],
+                "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n"
+            }),
+            None,
+        );
+        aggregate.meta = Some(ProviderMeta {
+            provider_type: Some("aggregate".to_string()),
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &aggregate)
+            .expect("save aggregate");
+
+        // 用户已经把它从 live 里删掉了。
+        let cleaned_live = r#"model_provider = "custom"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+personality = "pragmatic"
+
+[model_providers.custom]
+name = "multi-provider"
+base_url = "http://127.0.0.1:15921/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#;
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "PROXY_MANAGED" }),
+            Some(cleaned_live),
+        )
+        .expect("write cleaned live config");
+
+        service
+            .sync_codex_live_from_provider_while_proxy_active(&aggregate)
+            .await
+            .expect("re-project aggregate to live");
+
+        let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read live config");
+        let parsed: toml::Value = toml::from_str(&live).expect("valid TOML");
+
+        assert!(
+            parsed.get("disable_response_storage").is_none(),
+            "live 里删掉的键不得被聚合供应商的存储配置补回来，live:\n{live}"
         );
         assert_eq!(
-            stored_after_list
-                .settings_config
-                .get("defaultReasoningEffort")
-                .and_then(Value::as_str),
-            Some("low")
+            parsed.get("personality").and_then(|v| v.as_str()),
+            Some("pragmatic"),
+            "live 里保留的用户设置必须继续保留，live:\n{live}"
+        );
+        // 路由投影仍然必须正确落地。
+        assert_eq!(parsed["model"].as_str(), Some("gpt-5.6-sol"));
+        assert_eq!(parsed["model_provider"].as_str(), Some("custom"));
+        assert_eq!(
+            parsed["model_providers"]["custom"]["base_url"].as_str(),
+            Some("http://127.0.0.1:15921/v1")
         );
     }
 }
