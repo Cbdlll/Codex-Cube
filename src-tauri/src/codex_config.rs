@@ -2827,7 +2827,7 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
                 doc[field] = toml_edit::value(trimmed);
             }
         }
-        "model" | "model_catalog_json" => {
+        "model" | "model_catalog_json" | "model_reasoning_effort" => {
             if trimmed.is_empty() {
                 doc.as_table_mut().remove(field);
             } else {

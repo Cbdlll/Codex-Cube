@@ -1858,6 +1858,21 @@ impl ProxyService {
         existing_live: &Value,
         provider: &Provider,
     ) -> Result<(), String> {
+        // 供应商激活时以它自己的推理档位为准。Live 里那档是上一个供应商 / 当前
+        // 会话留下的，合并进来就等于让供应商互相改对方的设置，所以合并前先记住
+        // 本供应商的值，合并后再写回去——和下面 `model` 的处理同一个道理。
+        let provider_effort = effective_settings
+            .get("config")
+            .and_then(|value| value.as_str())
+            .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
+            .and_then(|doc| {
+                doc.get("model_reasoning_effort")
+                    .and_then(toml_edit::Item::as_str)
+                    .map(str::trim)
+                    .filter(|effort| !effort.is_empty())
+                    .map(str::to_string)
+            });
+
         *effective_settings = crate::codex_config::merge_codex_live_user_settings_into_backup(
             effective_settings,
             existing_live,
@@ -1870,6 +1885,19 @@ impl ProxyService {
             let updated =
                 crate::codex_config::update_codex_toml_field(config_text, "model", &model)
                     .map_err(|e| format!("重置 Codex model 失败: {e}"))?;
+            effective_settings["config"] = json!(updated);
+        }
+        if let Some(effort) = provider_effort {
+            let config_text = effective_settings
+                .get("config")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let updated = crate::codex_config::update_codex_toml_field(
+                config_text,
+                "model_reasoning_effort",
+                &effort,
+            )
+            .map_err(|e| format!("重置 Codex model_reasoning_effort 失败: {e}"))?;
             effective_settings["config"] = json!(updated);
         }
         Ok(())
@@ -5276,6 +5304,133 @@ requires_openai_auth = true
                 .and_then(|v| v.as_str()),
             Some("aihubmix-key"),
             "restore should still use the hot-switched provider auth"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hot_switch_codex_provider_uses_own_reasoning_effort_not_live_session() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "RightCode".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "rightcode-key"
+                },
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "AiHubMix".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "aihubmix-key"
+                },
+                "config": r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+model_reasoning_effort = "low"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+
+        db.save_provider("codex", &provider_a)
+            .expect("save provider a");
+        db.save_provider("codex", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("codex", "a")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("a"))
+            .expect("set local current provider");
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&provider_a.settings_config).expect("serialize provider a"),
+        )
+        .await
+        .expect("seed live backup");
+
+        // Live 里的档位是接管期间会话留下的，和任何供应商自己的设置都无关。
+        service
+            .write_codex_live(&json!({
+                "auth": {
+                    "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                },
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+model_reasoning_effort = "max"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }))
+            .expect("seed taken-over Codex live config");
+
+        service
+            .hot_switch_provider("codex", "b")
+            .await
+            .expect("hot switch Codex provider");
+
+        let live = service.read_codex_live().expect("read Codex live config");
+        let parsed_live: toml::Value = toml::from_str(
+            live.get("config")
+                .and_then(|v| v.as_str())
+                .expect("live config string"),
+        )
+        .expect("parse live config");
+        assert_eq!(
+            parsed_live
+                .get("model_reasoning_effort")
+                .and_then(|v| v.as_str()),
+            Some("low"),
+            "hot-switched live must use the new provider's own reasoning effort, not the live session's"
+        );
+
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("get live backup")
+            .expect("backup exists");
+        let stored: Value =
+            serde_json::from_str(&backup.original_config).expect("parse backup json");
+        let parsed_backup: toml::Value = toml::from_str(
+            stored
+                .get("config")
+                .and_then(|v| v.as_str())
+                .expect("backup config string"),
+        )
+        .expect("parse backup config");
+        assert_eq!(
+            parsed_backup
+                .get("model_reasoning_effort")
+                .and_then(|v| v.as_str()),
+            Some("low"),
+            "restore backup must keep the new provider's own reasoning effort"
         );
     }
 
