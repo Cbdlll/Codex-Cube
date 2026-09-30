@@ -3074,11 +3074,16 @@ pub fn merge_codex_live_permission_settings(target: &Value, live: &Value) -> Val
 /// 把当前被接管 Live 配置里的用户设置合并回备份配置。
 ///
 /// Codex Desktop 在接管期间会把用户设置（`model_reasoning_effort`、
-/// `personality`、`model_reasoning_summary`、`model_verbosity`、
-/// `disable_response_storage`，以及 `[desktop]` / `[plugins]` / `[mcp_servers]`
-/// 等）写进被接管的 config.toml。Codex-Cube 退出或崩溃恢复时若直接用接管前的
-/// 备份覆盖，这些设置会全部丢失。这里把 Live 配置里除接管投影字段外的顶层键
-/// 合并进备份，保证聚合订阅像普通订阅一样记住用户设置。
+/// `personality`、`model_reasoning_summary`、`model_verbosity`，以及
+/// `[desktop]` / `[plugins]` / `[mcp_servers]` 等）写进被接管的 config.toml。
+/// Codex-Cube 退出或崩溃恢复时若直接用接管前的备份覆盖，这些设置会全部丢失。
+/// 这里把 Live 配置里除接管投影字段外的顶层键合并进备份，保证聚合订阅像普通
+/// 订阅一样记住用户设置。
+///
+/// 非投影键以 Live 的键集为准，两个方向都算：Live 新增的键进备份，备份里有
+/// 而 Live 已经删掉的键从备份移除。只进不出的合并会让用户在 config.toml 里
+/// 删掉的废弃配置（例如 `disable_response_storage`）在每次恢复时复活——备份是
+/// 接管开始时的旧快照，而恢复只往 Live 上叠加，从不删键。
 pub fn merge_codex_live_user_settings_into_backup(backup: &Value, live: &Value) -> Value {
     let Some(backup_cfg) = backup.get("config").and_then(Value::as_str) else {
         return backup.clone();
@@ -3101,6 +3106,16 @@ pub fn merge_codex_live_user_settings_into_backup(backup: &Value, live: &Value) 
             continue;
         }
         merged.insert(key, value.clone());
+    }
+    let deleted_in_live: Vec<String> = merged
+        .iter()
+        .filter(|(key, _)| {
+            !CODEX_TAKEOVER_PROJECTED_KEYS.contains(key) && live_doc.get(key).is_none()
+        })
+        .map(|(key, _)| key.to_string())
+        .collect();
+    for key in deleted_in_live {
+        merged.as_table_mut().remove(&key);
     }
     let mut result = backup.clone();
     if let Some(obj) = result.as_object_mut() {
@@ -7381,6 +7396,37 @@ trust_level = "trusted"
         assert_eq!(parsed["approval_policy"].as_str(), Some("never"));
         assert!(parsed.get("model").is_none());
         assert!(parsed.get("model_provider").is_none());
+    }
+
+    #[test]
+    fn merge_codex_live_user_settings_drops_keys_user_deleted_from_live() {
+        let backup = json!({
+            "auth": { "OPENAI_API_KEY": "sk-original" },
+            "config": "model_provider = \"deepseek\"\nmodel = \"gpt-5.4\"\ndisable_response_storage = true\npersonality = \"pragmatic\"\n"
+        });
+        // 用户在 config.toml 里删掉了 disable_response_storage，Live 只剩 personality。
+        let live = json!({
+            "auth": { "OPENAI_API_KEY": "PROXY_MANAGED" },
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\npersonality = \"pragmatic\"\n\n[model_providers.custom]\nname = \"Aggregation\"\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"PROXY_MANAGED\"\n"
+        });
+
+        let merged = merge_codex_live_user_settings_into_backup(&backup, &live);
+        let cfg = merged
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config");
+        assert!(
+            !cfg.contains("disable_response_storage"),
+            "a key the user deleted from live must not come back on restore; got: {cfg}"
+        );
+        assert!(
+            cfg.contains("personality = \"pragmatic\""),
+            "keys still present in live must survive restore; got: {cfg}"
+        );
+        assert!(
+            cfg.contains("model_provider = \"deepseek\""),
+            "takeover-projected routing must still come from the backup; got: {cfg}"
+        );
     }
 
     #[test]
