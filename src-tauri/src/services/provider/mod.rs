@@ -1252,6 +1252,32 @@ wire_api = "responses"
         });
     }
 
+    /// Codex 0.160 起不再识别 `disable_response_storage`。写 Live 的最后一道关口必须
+    /// 把它剔掉，否则 Codex 每次启动都报 "unrecognized configuration setting" 警告，
+    /// 而用户的旧供应商快照里一直带着这个键。
+    #[test]
+    fn write_codex_live_drops_config_keys_codex_no_longer_knows() {
+        with_test_home(|_state, _home| {
+            crate::codex_config::write_codex_live_config_atomic(Some(
+                "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\ndisable_response_storage = true\n\n[model_providers.custom]\nbase_url = \"https://example.com/v1\"\nwire_api = \"responses\"\n",
+            ))
+            .expect("write live config");
+
+            let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+                .expect("read live config");
+            let parsed: toml::Value = toml::from_str(&live).expect("valid TOML");
+            assert!(
+                parsed.get("disable_response_storage").is_none(),
+                "Codex 已移除的键不得落进 config.toml，got:\n{live}"
+            );
+            assert_eq!(
+                parsed["model_providers"]["custom"]["base_url"].as_str(),
+                Some("https://example.com/v1"),
+                "供应商路由必须原样写入，got:\n{live}"
+            );
+        });
+    }
+
     #[test]
     #[serial]
     fn add_preserves_distinct_usage_credentials() {

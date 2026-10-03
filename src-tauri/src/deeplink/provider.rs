@@ -335,7 +335,6 @@ fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
         r#"model_provider = "custom"
 model = {model_name}
 model_reasoning_effort = "high"
-disable_response_storage = true
 
 [model_providers.custom]
 name = {provider_display_name}

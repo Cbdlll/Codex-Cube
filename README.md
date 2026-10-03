@@ -63,17 +63,9 @@ Codex users often keep multiple ChatGPT subscriptions, third-party API providers
 
 ### 🔗 Provider import
 
-- No `ccswitch://` handling - one-click import links belong to cc-switch; add providers manually in Codex Cube or import via a copy-paste script/config text
 - `codexcube://` deep links import providers, MCP servers, prompts, and skills
+- Manual add, or import by pasting an existing `config.toml` / `auth.json` pair
 - 60+ built-in provider presets cover official, aggregator, third-party, and Chinese relay-station providers
-
-### 🧩 Coexisting with cc-switch
-
-- Separate app data: Codex Cube uses `~/.codex-cube`, cc-switch uses `~/.cc-switch` - neither touches the other's database, settings, backups, or logs
-- One-click imports: Codex Cube does not handle `ccswitch://` links at all - they are left entirely to cc-switch
-- cc-switch migration: the SQL import accepts cc-switch exports and merges Codex providers, MCP servers, Codex prompts and model pricing (official seeds skipped, current provider restored)
-- Separate default proxy ports: Codex Cube listens on `127.0.0.1:15921` for new installs, cc-switch on `127.0.0.1:15721`, so both local proxies can run at the same time
-- Shared live config: both apps manage the same `~/.codex` (Codex CLI reads only that directory), so do not enable provider takeover in both apps simultaneously - the second takeover will overwrite the first
 
 ### ⚡ Local routing, failover, and reliability
 
@@ -101,7 +93,7 @@ Codex users often keep multiple ChatGPT subscriptions, third-party API providers
 - **Skills** - Install from GitHub repositories or ZIP files, search skills.sh, manage repositories, and import existing skills
 - **Sync options** - Store master copies under `~/.codex-cube/skills/` or `~/.agents/skills/`, with symlink or copy sync
 - **Backups** - Automatic backups before uninstall or changes, plus restore flows
-- **Deep links** - Import providers, MCP servers, prompts, and skills through `codexcube://` (`ccswitch://` links are left to cc-switch)
+- **Deep links** - Import providers, MCP servers, prompts, and skills through `codexcube://`
 
 ### 📁 Projects, sessions, and collaboration
 
@@ -196,6 +188,19 @@ Use the "Common Config Snippet" feature. Edit a provider, open "Edit Common Conf
 <summary><strong>How do I switch back to official login?</strong></summary>
 
 Add the Official preset and switch to it. You can also use Settings > Auth to manage ChatGPT and xAI/Grok accounts. After switching, run the Codex login/OAuth flow if needed.
+
+</details>
+
+<details>
+<summary><strong>Which Codex versions does Codex Cube target?</strong></summary>
+
+Validated against **Codex 0.160** with `codex doctor`. Every `config.toml` Codex Cube writes - presets, deep-link imports, takeover projection, and restore - is checked against the CLI's own parser:
+
+- Keys Codex has removed (for example `disable_response_storage`) are stripped before anything is written, so Codex never reports `unrecognized configuration setting`
+- `web_search` values Codex no longer accepts (anything outside `disabled` / `cached` / `indexed` / `live`) are dropped rather than left in place. An invalid value there does not warn - it makes Codex refuse to load the config at all
+- Your own keys, comments, and table layout are preserved verbatim
+
+To check your own setup: `codex doctor` reports every setting it is ignoring.
 
 </details>
 
@@ -347,7 +352,9 @@ Feel free to open issues and pull requests. Before submitting a PR, make sure:
 
 ## 🙏 Acknowledgments
 
-This project is developed with reference to [CC Switch](https://github.com/farion1231/cc-switch) and adapted as a Codex-focused manager.
+This project is developed with reference to [CC Switch](https://github.com/farion1231/cc-switch), and adapted as a Codex-focused manager.
+
+The two apps are designed to coexist: separate data directories (`~/.codex-cube` vs `~/.cc-switch`), separate default proxy ports (`127.0.0.1:15921` vs `127.0.0.1:15721`), and a SQL importer that migrates Codex providers, MCP servers, prompts, and model pricing out of a CC Switch export. Both write the same `~/.codex`, so enable provider takeover in only one of them at a time.
 
 ## 📄 License
 

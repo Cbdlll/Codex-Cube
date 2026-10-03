@@ -261,6 +261,7 @@ pub fn write_codex_live_atomic(
         &cfg_text,
     )?;
     let cfg_text = preserve_codex_mcp_servers_for_live_write(&current_config, &cfg_text)?;
+    let cfg_text = sanitize_codex_live_config_text(&cfg_text);
     if !cfg_text.trim().is_empty() {
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
@@ -391,6 +392,7 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
         &cfg_text,
     )?;
     let cfg_text = preserve_codex_mcp_servers_for_live_write(&current_config, &cfg_text)?;
+    let cfg_text = sanitize_codex_live_config_text(&cfg_text);
 
     if !cfg_text.trim().is_empty() {
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
@@ -2014,11 +2016,12 @@ pub fn prepare_codex_live_config_text_with_optional_catalog(
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
-    if codex_settings_has_inline_model_catalog_source(settings) {
-        prepare_codex_config_text_with_model_catalog(settings, config_text, profile)
+    let prepared = if codex_settings_has_inline_model_catalog_source(settings) {
+        prepare_codex_config_text_with_model_catalog(settings, config_text, profile)?
     } else {
-        Ok(config_text.to_string())
-    }
+        config_text.to_string()
+    };
+    Ok(sanitize_codex_live_config_text(&prepared))
 }
 
 pub(crate) fn codex_settings_has_inline_model_catalog_source(settings: &Value) -> bool {
@@ -2993,6 +2996,55 @@ pub fn build_aggregate_takeover_toml(
     }
 
     Ok(doc.to_string())
+}
+
+/// Codex 已移除的顶层配置键。
+///
+/// `disable_response_storage` 曾经在 config.toml 里生效，Codex 0.160 的 ConfigToml
+/// 已经不认识它，写进去只会让 Codex 每次启动都报 "Codex is ignoring 1 unrecognized
+/// configuration setting"。Codex-Cube 生成、导入、接管、恢复的每一份 config.toml 都
+/// 可能带着这个键（历史供应商快照尤其），因此统一在写 Live 之前剔除。
+///
+/// 同批被移除的还有顶层 `base_url` / `wire_api`（0.160 只认 `[model_providers.*]`
+/// 里的写法），但它们是历史供应商快照的路由字段、且本项目的投影逻辑仍在读，留给
+/// 显式的迁移逻辑处理，不在这里一并删。
+const CODEX_REMOVED_CONFIG_KEYS: &[&str] = &["disable_response_storage"];
+
+/// Codex 0.160 的 `web_search` 合法取值（实测 `codex doctor`）。
+///
+/// 取值非法不是警告而是**整份 config.toml 拒绝加载**（`unknown variant`），Codex 直接
+/// 起不来。旧文档和社区配置里的 `enabled` 就是这样一个值：丢掉该键等于回到 Codex 默认
+/// （工具可用），比留着一个让 Codex 拒绝启动的值安全。
+const CODEX_WEB_SEARCH_VALUES: &[&str] = &["disabled", "cached", "indexed", "live"];
+
+/// 把 config.toml 收拾成当前 Codex 能加载的样子：删掉 Codex 已移除的顶层键，丢掉
+/// 取值非法的 `web_search`。无法解析或没有命中时原样返回，不改动用户文本。
+pub fn sanitize_codex_live_config_text(config_text: &str) -> String {
+    if config_text.trim().is_empty() {
+        return config_text.to_string();
+    }
+    let Ok(mut doc) = config_text.parse::<DocumentMut>() else {
+        return config_text.to_string();
+    };
+    let mut changed = false;
+    for key in CODEX_REMOVED_CONFIG_KEYS {
+        if doc.as_table_mut().remove(key).is_some() {
+            changed = true;
+        }
+    }
+    let web_search_invalid =
+        doc.get(CODEX_WEB_SEARCH_FIELD)
+            .is_some_and(|item| match item.as_str() {
+                Some(value) => !CODEX_WEB_SEARCH_VALUES.contains(&value),
+                None => true,
+            });
+    if web_search_invalid && doc.as_table_mut().remove(CODEX_WEB_SEARCH_FIELD).is_some() {
+        changed = true;
+    }
+    if !changed {
+        return config_text.to_string();
+    }
+    doc.to_string()
 }
 
 /// Codex 接管投影专属的顶层键：恢复备份时不会从 Live 复制这些键。
@@ -7207,6 +7259,87 @@ model_reasoning_effort = "max"
             settings.get("defaultModel").and_then(Value::as_str),
             Some("gpt-5.6-sol")
         );
+    }
+
+    /// Codex 0.160 不再认识 `disable_response_storage`，留着它 Codex 每次启动都会
+    /// 报 "unrecognized configuration setting" 警告。
+    #[test]
+    fn sanitize_codex_live_config_text_drops_keys_codex_no_longer_knows() {
+        let stripped = sanitize_codex_live_config_text(
+            "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\ndisable_response_storage = true\n\n[model_providers.custom]\nbase_url = \"http://127.0.0.1:15921/v1\"\n",
+        );
+        let parsed: toml::Value = toml::from_str(&stripped).expect("valid TOML");
+        assert!(
+            parsed.get("disable_response_storage").is_none(),
+            "Codex 已移除的键不得写进 config.toml，got:\n{stripped}"
+        );
+        assert_eq!(
+            parsed.get("model").and_then(|v| v.as_str()),
+            Some("gpt-5.6-sol"),
+            "其余顶层键必须原样保留，got:\n{stripped}"
+        );
+        assert_eq!(
+            parsed["model_providers"]["custom"]["base_url"].as_str(),
+            Some("http://127.0.0.1:15921/v1"),
+            "供应商路由段必须原样保留，got:\n{stripped}"
+        );
+    }
+
+    /// 剔除路径会整份重新序列化 config.toml，注释和表格结构必须原样保留，
+    /// 否则用户手写的说明会在每次切换供应商时被悄悄抹掉。
+    #[test]
+    fn sanitize_codex_live_config_text_preserves_comments_and_tables() {
+        let input = "# 我自己的备注\r\nmodel_provider = \"custom\"\r\ndisable_response_storage = true\r\n\r\n# 路由段\r\n[model_providers.custom]\r\nname = \"custom\"\r\nbase_url = \"https://example.com/v1\"\r\nwire_api = \"responses\"\r\n\r\n[desktop]\r\nlocaleOverride = \"zh-CN\"\r\n";
+        let stripped = sanitize_codex_live_config_text(input);
+        assert!(
+            !stripped.contains("disable_response_storage"),
+            "got: {stripped}"
+        );
+        assert!(stripped.contains("# 我自己的备注"), "注释丢失: {stripped}");
+        assert!(stripped.contains("# 路由段"), "注释丢失: {stripped}");
+        assert!(
+            stripped.contains("[model_providers.custom]"),
+            "got: {stripped}"
+        );
+        assert!(stripped.contains("[desktop]"), "got: {stripped}");
+        assert!(
+            stripped.contains("localeOverride = \"zh-CN\""),
+            "got: {stripped}"
+        );
+    }
+
+    /// `web_search` 取值非法时 Codex 不是警告而是拒绝加载整份 config.toml。丢掉该键
+    /// 等于回到 Codex 默认（工具可用），比留着一个让 Codex 起不来的值安全。
+    #[test]
+    fn sanitize_codex_live_config_text_drops_invalid_web_search_value() {
+        let legacy =
+            sanitize_codex_live_config_text("model = \"gpt-5\"\nweb_search = \"enabled\"\n");
+        assert!(!legacy.contains("web_search"), "got: {legacy}");
+        assert!(
+            legacy.contains("model = \"gpt-5\""),
+            "其余键必须保留: {legacy}"
+        );
+
+        let wrong_type = sanitize_codex_live_config_text("model = \"gpt-5\"\nweb_search = true\n");
+        assert!(!wrong_type.contains("web_search"), "got: {wrong_type}");
+
+        for value in CODEX_WEB_SEARCH_VALUES {
+            let text = format!("model = \"gpt-5\"\nweb_search = \"{value}\"\n");
+            assert_eq!(
+                sanitize_codex_live_config_text(&text),
+                text,
+                "0.160 的合法取值不得被动: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_codex_live_config_text_leaves_clean_text_untouched() {
+        let clean = "model_provider = \"custom\"\nmodel = \"gpt-5.6-sol\"\n";
+        assert_eq!(sanitize_codex_live_config_text(clean), clean);
+        assert_eq!(sanitize_codex_live_config_text(""), "");
+        let unparsable = "this is not = = valid toml";
+        assert_eq!(sanitize_codex_live_config_text(unparsable), unparsable);
     }
 
     #[test]

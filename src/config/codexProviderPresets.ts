@@ -77,7 +77,6 @@ export function generateThirdPartyConfig(
   return `model_provider = "custom"
 model = ${tomlString(modelName)}
 model_reasoning_effort = "high"
-disable_response_storage = true
 
 [model_providers.custom]
 name = ${tomlString(providerName)}
@@ -251,7 +250,6 @@ export const codexProviderPresets: CodexProviderPreset[] = [
 model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
-disable_response_storage = true
 
 [model_providers.custom]
 name = "APINebula"
@@ -426,7 +424,6 @@ requires_openai_auth = true`,
 model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
-disable_response_storage = true
 
 [model_providers.custom]
 name = "APIKEY.FUN"
@@ -692,7 +689,6 @@ requires_openai_auth = true`,
     auth: generateThirdPartyAuth(""),
     config: `model_provider = "custom"
 model = "zai-org/glm-5.1"
-disable_response_storage = true
 
 [model_providers.custom]
 name = "AtlasCloud"
@@ -900,7 +896,6 @@ requires_openai_auth = true`,
 model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
-disable_response_storage = true
 
 [model_providers.custom]
 name = "SudoCode"
@@ -923,7 +918,6 @@ requires_openai_auth = true`,
 model = "gpt-5.6-sol"
 review_model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
-disable_response_storage = true
 model_verbosity = "high"
 
 [model_providers.custom]
@@ -980,7 +974,6 @@ requires_openai_auth = true`,
     config: `model_provider = "custom"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
-disable_response_storage = true
 
 [model_providers.custom]
 name = "Azure OpenAI"
@@ -1152,8 +1145,8 @@ requires_openai_auth = true`,
       "https://tokenhub.tencentmaas.cn/v1",
     ],
     // 腾讯 TokenHub 官方 Codex 文档（cloud.tencent.com/document/product/1823/133532）：
-    // hy3 原生 Responses（wire_api=responses；官方硬性要求的
-    // disable_response_storage=true 已由 generateThirdPartyConfig 输出）。
+    // hy3 原生 Responses（wire_api=responses；官方文档曾要求
+    // disable_response_storage=true，但 Codex 0.160 已移除该配置键，写了会被忽略）。
     // ⚠️ 须用 TokenHub API Key（创建时范围需勾选 Hy3）；Coding Plan / Token Plan
     // 订阅 Key 只能走各自 chat 端点，对本预设的 /v1 不通。
     // hy3 在带 tools 的请求里会把 reasoning_effort=low 服务端自动升为 high
@@ -1792,7 +1785,6 @@ requires_openai_auth = true`,
     config: `model_provider = "custom"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
-disable_response_storage = true
 personality = "pragmatic"
 
 [model_providers.custom]
@@ -1816,7 +1808,6 @@ model_context_window = 1000000`,
     config: `model_provider = "custom"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "medium"
-disable_response_storage = true
 
 [model_providers.custom]
 name = "PIPELLM"

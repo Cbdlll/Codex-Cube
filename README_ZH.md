@@ -63,17 +63,9 @@ Codex 用户通常会同时使用多个 ChatGPT 订阅、第三方 API 供应商
 
 ### 🔗 供应商导入
 
-- 不处理 `ccswitch://` 一键导入链接 - 一键导入归 cc-switch；在 Codex Cube 内手动添加供应商，或通过复制脚本/配置文本导入
 - `codexcube://` 深链可导入 MCP 服务器、Prompts 和 Skills
+- 手动添加，或直接粘贴现有的 `config.toml` / `auth.json` 导入
 - 内置 60+ 供应商预设，覆盖官方、聚合、第三方和国内中转站供应商
-
-### 🧩 与 cc-switch 共存
-
-- 数据目录隔离：Codex Cube 使用 `~/.codex-cube`，cc-switch 使用 `~/.cc-switch`，双方的数据库、设置、备份、日志互不干扰
-- 一键导入归属：Codex Cube 完全不处理 `ccswitch://` 链接，一键导入只归 cc-switch
-- cc-switch 迁移：SQL 导入支持 cc-switch 导出的文件，合并 Codex 供应商、MCP、Codex 提示词与模型定价（跳过官方种子，还原当前供应商）
-- 默认代理端口隔离：Codex Cube 新安装默认监听 `127.0.0.1:15921`，cc-switch 为 `127.0.0.1:15721`，两个本地代理可同时运行
-- Live 配置共享：双方管理的都是同一份 `~/.codex`（Codex CLI 只读该目录），不要在两个应用里同时开启供应商接管，后开启的会覆盖先生效的
 
 ### ⚡ 本地路由、故障转移与稳定性
 
@@ -101,7 +93,7 @@ Codex 用户通常会同时使用多个 ChatGPT 订阅、第三方 API 供应商
 - **Skills** - 从 GitHub 仓库或 ZIP 文件安装，搜索 skills.sh，管理仓库并导入现有技能
 - **同步方式** - 主副本保存在 `~/.codex-cube/skills/` 或 `~/.agents/skills/`，支持软链接或文件复制
 - **备份** - 卸载或变更前自动备份，并提供恢复流程
-- **Deep Link** - 通过 `codexcube://` 导入供应商、MCP 服务器、Prompts 和 Skills（`ccswitch://` 链接留给 cc-switch）
+- **Deep Link** - 通过 `codexcube://` 导入供应商、MCP 服务器、Prompts 和 Skills
 
 ### 📁 项目、会话与协作
 
@@ -196,6 +188,19 @@ Codex Cube 专注于 **Codex**（CLI 和 Desktop），不支持 Claude Code、Ge
 <summary><strong>如何切回官方登录？</strong></summary>
 
 添加官方预设并切换过去。也可以在“设置 > 认证”中管理 ChatGPT 和 xAI/Grok 账号。切换后按需执行 Codex 登录/OAuth 流程。
+
+</details>
+
+<details>
+<summary><strong>Codex Cube 面向哪些 Codex 版本？</strong></summary>
+
+以 **Codex 0.160** 为基准，用 `codex doctor` 逐项校验。Codex Cube 写出的每一份 `config.toml`（预设、深链导入、接管投影、备份恢复）都要过一遍 Codex 自己的解析器：
+
+- Codex 已移除的键（例如 `disable_response_storage`）在写入前剔除，Codex 不会再报 `unrecognized configuration setting`
+- Codex 不再接受的 `web_search` 取值（即 `disabled` / `cached` / `indexed` / `live` 之外的值）直接丢掉而不是原样留着 —— 这里的非法取值不是警告，而是让 Codex 整份配置加载失败
+- 你自己的键、注释和表格结构原样保留
+
+想检查自己的环境：`codex doctor` 会列出它忽略掉的每一个配置项。
 
 </details>
 
@@ -348,6 +353,8 @@ cargo test --features test-hooks
 ## 🙏 致谢
 
 本项目参考 [CC Switch](https://github.com/farion1231/cc-switch) 进行开发，并调整为专注 Codex 的管理工具。
+
+两个应用可以共存：数据目录隔离（`~/.codex-cube` 与 `~/.cc-switch`），默认代理端口隔离（`127.0.0.1:15921` 与 `127.0.0.1:15721`），SQL 导入可从 CC Switch 导出文件迁移 Codex 供应商、MCP、提示词与模型定价。双方管理的是同一份 `~/.codex`，因此同一时间只在其中一个应用里开启供应商接管。
 
 ## 📄 License
 

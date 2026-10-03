@@ -7,7 +7,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  AlertTriangle,
   ChevronsUpDown,
   FileText,
   Info,
@@ -438,14 +437,14 @@ export function AgentsPanel(_props: AgentsPanelProps) {
         </Card>
 
         <Tabs defaultValue="subagents">
-          <TabsList className="grid w-full grid-cols-2 rounded-lg bg-muted p-1">
-            <TabsTrigger value="subagents" className="min-w-0 gap-2">
+          <TabsList className="inline-flex h-9 w-auto rounded-lg bg-muted p-1">
+            <TabsTrigger value="subagents" className="gap-2 rounded-md px-3">
               <Users className="h-4 w-4" />
               {t("agents.tabSubagents", {
                 defaultValue: "Subagent Registration",
               })}
             </TabsTrigger>
-            <TabsTrigger value="workflow" className="min-w-0 gap-2">
+            <TabsTrigger value="workflow" className="gap-2 rounded-md px-3">
               <FileText className="h-4 w-4" />
               {t("agents.tabWorkflow", { defaultValue: "Workflow Skill" })}
             </TabsTrigger>
@@ -497,37 +496,41 @@ export function AgentsPanel(_props: AgentsPanelProps) {
                 </div>
               </CardHeader>
               <CardContent className="flex flex-col gap-2 px-4 pb-4 pt-0">
-                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-700/60 dark:bg-amber-900/20">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-                  <div className="min-w-0 text-xs leading-snug text-amber-700 dark:text-amber-300">
-                    <p className="font-semibold">
-                      {t("agents.subagentRoutingRequiredTitle", {
-                        defaultValue:
-                          "Local routing required for custom subagents",
-                      })}
-                    </p>
-                    <p className="mt-0.5">
-                      {t("agents.subagentRoutingRequiredBody", {
-                        defaultValue:
-                          "Multi-agent v2 encrypts dispatched tasks. Without local routing enabled, Codex cannot deliver plaintext tasks to your custom subagents — delegation fails with empty or unreadable messages. Enable local routing (Proxy page → Local proxy takeover) before registering or using custom subagents.",
-                      })}
-                    </p>
+                {/* 两条约束条件同权重，用同一个灰色容器分成两行：原来一条黄底一条
+                    灰底并排，黄底既抢眼又和下面的提示不在一个体系里。 */}
+                <div className="overflow-hidden rounded-lg border border-border bg-muted/40">
+                  <div className="flex items-start gap-2 px-3 py-2.5">
+                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 text-xs leading-snug text-muted-foreground">
+                      <p className="font-semibold text-foreground">
+                        {t("agents.subagentRoutingRequiredTitle", {
+                          defaultValue:
+                            "Local routing required for custom subagents",
+                        })}
+                      </p>
+                      <p className="mt-0.5">
+                        {t("agents.subagentRoutingRequiredBody", {
+                          defaultValue:
+                            "Multi-agent v2 encrypts dispatched tasks. Without local routing enabled, Codex cannot deliver plaintext tasks to your custom subagents — delegation fails with empty or unreadable messages. Enable local routing (Proxy page → Local proxy takeover) before registering or using custom subagents.",
+                        })}
+                      </p>
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                  <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 text-xs leading-snug text-muted-foreground">
-                    <p className="font-semibold">
-                      {t("agents.subagentResponsesOnlyTitle", {
-                        defaultValue: "Responses protocol only",
-                      })}
-                    </p>
-                    <p className="mt-0.5">
-                      {t("agents.subagentResponsesOnlyBody", {
-                        defaultValue:
-                          "Custom subagents only support the Responses protocol. Chat Completions / Anthropic are not supported because Codex collaboration subagent task delivery relies on Responses plaintext handling.",
-                      })}
-                    </p>
+                  <div className="flex items-start gap-2 border-t border-border px-3 py-2.5">
+                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 text-xs leading-snug text-muted-foreground">
+                      <p className="font-semibold text-foreground">
+                        {t("agents.subagentResponsesOnlyTitle", {
+                          defaultValue: "Responses protocol only",
+                        })}
+                      </p>
+                      <p className="mt-0.5">
+                        {t("agents.subagentResponsesOnlyBody", {
+                          defaultValue:
+                            "Custom subagents only support the Responses protocol. Chat Completions / Anthropic are not supported because Codex collaboration subagent task delivery relies on Responses plaintext handling.",
+                        })}
+                      </p>
+                    </div>
                   </div>
                 </div>
                 {subagentsLoading ? (
